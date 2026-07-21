@@ -1,0 +1,11 @@
+{
+  "status": "ok",
+  "models_loaded": {
+    "churn": true,
+    "segment": true,
+    "recommender": true
+  },
+  "model_version": "20260613-194657",
+  "demo_mode": false,
+  "artifact_uri": null
+}

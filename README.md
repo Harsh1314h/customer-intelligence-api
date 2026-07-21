@@ -44,7 +44,27 @@ The churn model is trained with time-based snapshots: it builds customer feature
 - `models/recommender.joblib`
 - `models/metadata.json`
 
+During training, the script prints progress like:
+
+```text
+[1/8] Loading transactions...
+[2/8] Cleaning transactions...
+[3/8] Building latest customer features...
+[4/8] Building time-based churn training snapshots...
+[5/8] Starting MLflow experiment...
+[6/8] Training churn ensemble...
+[7/8] Training K-Means customer segmentation...
+[8/8] Training collaborative filtering recommender and saving artifacts...
+```
+
 ## Example Requests
+
+Ready-to-copy request examples are also available in:
+
+- `examples/churn_request.json`
+- `examples/segment_request.json`
+- `examples/recommend_request.json`
+- `examples/health_response.json`
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/predict/churn `
@@ -58,28 +78,16 @@ curl -X POST http://127.0.0.1:8000/recommend `
   -d "{\"customer_id\":\"17850\",\"recent_product_ids\":[\"85123A\",\"71053\"],\"top_n\":5}"
 ```
 
-## GCP Deployment
+## AWS Deployment
 
-Use Google Cloud Run when you want the architecture in your diagram.
+The production workflow uses AWS App Runner, ECR, and S3:
 
-```powershell
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com storage.googleapis.com
-gcloud artifacts repositories create customer-intelligence --repository-format=docker --location=asia-south1
-gcloud storage buckets create gs://YOUR_BUCKET_NAME --location=asia-south1
-gcloud storage cp models/* gs://YOUR_BUCKET_NAME/customer-intelligence/models/
-```
+- GitHub Actions runs tests on every push and pull request.
+- Docker images are pushed to Amazon ECR.
+- Trained model artifacts are loaded from Amazon S3.
+- AWS App Runner serves the public HTTPS API.
 
-Set these GitHub secrets:
-
-- `GCP_PROJECT_ID`
-- `GCP_SA_KEY`
-- `CI_MODEL_ARTIFACT_URI=gs://YOUR_BUCKET_NAME/customer-intelligence/models/`
-
-The workflow in `.github/workflows/deploy.yml` runs tests, builds the Docker image, pushes to Artifact Registry, and deploys to Cloud Run.
-
-## AWS Alternative
-
-The same API can run on AWS App Runner or ECS Fargate. Store artifacts in S3 and set:
+Store artifacts in S3 and set:
 
 ```powershell
 aws s3 cp models/ s3://YOUR_BUCKET_NAME/customer-intelligence/models/ --recursive
@@ -90,10 +98,10 @@ Runtime environment variables:
 - `CI_MODEL_ARTIFACT_URI=s3://YOUR_BUCKET_NAME/customer-intelligence/models/`
 - `CI_ALLOW_DEMO_MODELS=false`
 
-Use ECR for the Docker image and App Runner for the managed service if you want a Cloud Run-like AWS setup.
+Full step-by-step setup is in `docs/aws-deployment.md`.
 
 ## Production Notes
 
 - Keep `CI_ALLOW_DEMO_MODELS=false` in production so missing artifacts fail fast.
-- Use GCP service account permissions for Cloud Storage reads, or AWS IAM permissions for S3 reads.
+- Use AWS IAM permissions for S3 model artifact reads.
 - The included neural model uses `sklearn.neural_network.MLPClassifier` to keep the container lightweight. You can swap it for TensorFlow/Keras later without changing the API contract.

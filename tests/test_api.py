@@ -48,6 +48,22 @@ def test_recommendation_contract(tmp_path, monkeypatch):
         assert {"product_id", "score", "name"} <= set(payload["recommendations"][0])
 
 
+def test_churn_rejects_negative_customer_features(tmp_path, monkeypatch):
+    customer = sample_customer()
+    customer["recency_days"] = -1
+    with build_client(tmp_path, monkeypatch) as client:
+        response = client.post("/predict/churn", json={"customer": customer})
+
+        assert response.status_code == 422
+
+
+def test_recommend_rejects_unbounded_top_n(tmp_path, monkeypatch):
+    with build_client(tmp_path, monkeypatch) as client:
+        response = client.post("/recommend", json={"top_n": 500})
+
+        assert response.status_code == 422
+
+
 @contextmanager
 def build_client(tmp_path, monkeypatch):
     monkeypatch.setenv("CI_MODEL_DIR", str(tmp_path / "models"))

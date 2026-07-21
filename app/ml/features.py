@@ -20,6 +20,7 @@ COLUMN_ALIASES = {
     "invoice_no": "invoice_id",
     "stockcode": "stock_code",
     "stock_code": "stock_code",
+    "stock code": "stock_code",
     "description": "description",
     "quantity": "quantity",
     "invoicedate": "invoice_date",

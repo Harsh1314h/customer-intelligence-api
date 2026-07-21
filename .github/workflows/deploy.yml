@@ -1,4 +1,4 @@
-name: Test, Build, and Deploy
+name: Test, Build, and Deploy to AWS
 
 on:
   push:
@@ -6,11 +6,15 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+  id-token: write
+
 env:
   PYTHON_VERSION: "3.11"
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: customer-intelligence-api
   SERVICE_NAME: customer-intelligence-api
-  GCP_REGION: asia-south1
-  GCP_ARTIFACT_REPOSITORY: customer-intelligence
 
 jobs:
   test:
@@ -28,40 +32,83 @@ jobs:
       - name: Run tests
         run: pytest
 
-  deploy-gcp:
+  deploy-aws:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      APP_RUNNER_SERVICE_ARN: ${{ secrets.APP_RUNNER_SERVICE_ARN }}
+      APP_RUNNER_ACCESS_ROLE_ARN: ${{ secrets.APP_RUNNER_ACCESS_ROLE_ARN }}
       CI_MODEL_ARTIFACT_URI: ${{ secrets.CI_MODEL_ARTIFACT_URI }}
     steps:
       - uses: actions/checkout@v4
-      - name: Skip deploy when GCP secrets are absent
-        if: env.GCP_PROJECT_ID == '' || env.GCP_SA_KEY == ''
-        run: echo "GCP deployment skipped because GCP_PROJECT_ID or GCP_SA_KEY is not configured."
-      - id: auth
-        if: env.GCP_PROJECT_ID != '' && env.GCP_SA_KEY != ''
-        uses: google-github-actions/auth@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-      - if: env.GCP_PROJECT_ID != '' && env.GCP_SA_KEY != ''
-        uses: google-github-actions/setup-gcloud@v2
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
+          aws ecr create-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-scanning-configuration scanOnPush=true \
+            --encryption-configuration encryptionType=AES256
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build and push image
-        if: env.GCP_PROJECT_ID != '' && env.GCP_SA_KEY != ''
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          gcloud auth configure-docker $GCP_REGION-docker.pkg.dev --quiet
-          IMAGE="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$GCP_ARTIFACT_REPOSITORY/$SERVICE_NAME:${{ github.sha }}"
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-      - name: Deploy to Cloud Run
-        if: env.GCP_PROJECT_ID != '' && env.GCP_SA_KEY != ''
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      - name: Update App Runner service
         run: |
-          gcloud run deploy "$SERVICE_NAME" \
-            --image "$IMAGE" \
-            --region "$GCP_REGION" \
-            --platform managed \
-            --allow-unauthenticated \
-            --set-env-vars "CI_MODEL_ARTIFACT_URI=$CI_MODEL_ARTIFACT_URI,CI_ALLOW_DEMO_MODELS=false"
+          if [ -z "$APP_RUNNER_SERVICE_ARN" ]; then
+            echo "APP_RUNNER_SERVICE_ARN is not set yet. Image was pushed to ECR; create App Runner, add the secret, then push again."
+            exit 0
+          fi
+
+          if [ -z "$APP_RUNNER_ACCESS_ROLE_ARN" ]; then
+            echo "APP_RUNNER_ACCESS_ROLE_ARN is required so App Runner can pull from private ECR."
+            exit 1
+          fi
+
+          if [ -z "$CI_MODEL_ARTIFACT_URI" ]; then
+            echo "CI_MODEL_ARTIFACT_URI is required, for example s3://bucket/customer-intelligence/models/"
+            exit 1
+          fi
+
+          cat > source-configuration.json <<EOF
+          {
+            "ImageRepository": {
+              "ImageIdentifier": "$IMAGE_URI",
+              "ImageRepositoryType": "ECR",
+              "ImageConfiguration": {
+                "Port": "8080",
+                "RuntimeEnvironmentVariables": {
+                  "CI_MODEL_ARTIFACT_URI": "$CI_MODEL_ARTIFACT_URI",
+                  "CI_ALLOW_DEMO_MODELS": "false"
+                }
+              }
+            },
+            "AuthenticationConfiguration": {
+              "AccessRoleArn": "$APP_RUNNER_ACCESS_ROLE_ARN"
+            },
+            "AutoDeploymentsEnabled": false
+          }
+          EOF
+
+          aws apprunner update-service \
+            --service-arn "$APP_RUNNER_SERVICE_ARN" \
+            --source-configuration file://source-configuration.json

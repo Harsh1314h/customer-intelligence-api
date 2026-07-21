@@ -24,6 +24,19 @@ from app.ml.recommender import CollaborativeRecommender
 from app.ml.segmentation import CustomerSegmenter
 
 
+def log_step(step_number: int, total_steps: int, message: str) -> None:
+    print(f"[{step_number}/{total_steps}] {message}", flush=True)
+
+
+def log_metric_block(title: str, metrics: dict[str, float | int]) -> None:
+    print(title, flush=True)
+    for metric_name, metric_value in metrics.items():
+        if isinstance(metric_value, float):
+            print(f"  - {metric_name}: {metric_value:.4f}", flush=True)
+        else:
+            print(f"  - {metric_name}: {metric_value}", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train customer intelligence models.")
     parser.add_argument("--transactions", required=True, help="Path to Online Retail II CSV/XLSX dataset.")
@@ -59,16 +72,29 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    log_step(1, 8, f"Loading transactions from {args.transactions}...")
     raw_transactions = load_transactions(Path(args.transactions))
+    print(f"  - raw rows: {len(raw_transactions):,}", flush=True)
+
+    log_step(2, 8, "Cleaning transactions...")
     transactions = normalize_transactions(raw_transactions)
+    print(f"  - cleaned rows: {len(transactions):,}", flush=True)
+
+    log_step(3, 8, "Building latest customer features...")
     customer_features = build_customer_features(transactions)
+    print(f"  - customers: {len(customer_features):,}", flush=True)
+
+    log_step(4, 8, "Building time-based churn training snapshots...")
     churn_dataset = build_time_based_churn_dataset(
         transactions,
         prediction_window_days=args.prediction_window_days,
         min_history_days=args.min_history_days,
         max_snapshots=args.churn_snapshots,
     )
+    print(f"  - churn rows: {len(churn_dataset):,}", flush=True)
+    print(f"  - churn customers: {churn_dataset['customer_id'].nunique():,}", flush=True)
 
+    log_step(5, 8, f"Starting MLflow experiment '{args.experiment_name}'...")
     mlflow.set_experiment(args.experiment_name)
     with mlflow.start_run(run_name=f"training-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"):
         mlflow.log_params(
@@ -85,18 +111,30 @@ def main() -> None:
             }
         )
 
+        log_step(6, 8, "Training churn ensemble...")
         churn_model, churn_metrics = train_churn_model(churn_dataset)
         joblib.dump(churn_model, output_dir / "churn_model.joblib")
         mlflow.log_metrics({f"churn_{key}": value for key, value in churn_metrics.items()})
+        log_metric_block("  Churn metrics:", churn_metrics)
 
+        log_step(7, 8, "Training K-Means customer segmentation...")
         segment_model, segment_metrics = train_segment_model(customer_features, args.n_clusters)
         joblib.dump(segment_model, output_dir / "segment_model.joblib")
         mlflow.log_metrics({f"segment_{key}": value for key, value in segment_metrics.items()})
+        log_metric_block("  Segmentation metrics:", segment_metrics)
 
+        log_step(8, 8, "Training collaborative filtering recommender and saving artifacts...")
         recommender = CollaborativeRecommender.fit(transactions, n_components=args.svd_components)
         joblib.dump(recommender, output_dir / "recommender.joblib")
         mlflow.log_metric("recommender_items", len(recommender.item_ids))
         mlflow.log_metric("recommender_users", len(recommender.user_to_index))
+        log_metric_block(
+            "  Recommender stats:",
+            {
+                "items": len(recommender.item_ids),
+                "users": len(recommender.user_to_index),
+            },
+        )
 
         metadata = {
             "model_version": datetime.now(UTC).strftime("%Y%m%d-%H%M%S"),
@@ -125,7 +163,7 @@ def main() -> None:
         for artifact in output_dir.glob("*"):
             mlflow.log_artifact(str(artifact), artifact_path="model_artifacts")
 
-    print(f"Artifacts written to {output_dir.resolve()}")
+    print(f"Done. Artifacts written to {output_dir.resolve()}", flush=True)
 
 
 def load_transactions(path: Path) -> pd.DataFrame:
