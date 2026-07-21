@@ -1,50 +1,183 @@
 # Customer Intelligence API
 
-Production-style FastAPI service for e-commerce customer intelligence:
+A production-style FastAPI service for e-commerce customer intelligence. It exposes three ML-powered REST endpoints for churn prediction, customer segmentation, and product recommendations.
 
-- `POST /predict/churn` returns churn probability from an XGBoost plus neural-network ensemble.
-- `POST /segment/customer` assigns a K-Means customer segment.
-- `POST /recommend` returns collaborative-filtering product recommendations.
-- `GET /health` reports model loading status for Cloud Run, App Runner, or container probes.
+This project is designed like a backend service that another frontend, mobile app, CRM, or internal system could call with JSON and receive ML results in real time.
 
-The API starts with tiny demo artifacts so you can run it immediately. For the real project, train on Kaggle's Online Retail II dataset and replace the demo artifacts in `models/`.
+## What It Does
+
+| Endpoint | Method | ML Paradigm | Purpose |
+| --- | --- | --- | --- |
+| `/health` | `GET` | Operations | Confirms service and model loading status |
+| `/predict/churn` | `POST` | Supervised learning | Predicts customer churn probability |
+| `/segment/customer` | `POST` | Unsupervised learning | Assigns a customer segment using K-Means |
+| `/recommend` | `POST` | Recommender systems | Returns top-N product recommendations |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client["Client / Frontend / CRM"] --> api["FastAPI Service"]
+    api --> schemas["Pydantic Validation"]
+    schemas --> registry["Model Registry"]
+    registry --> churn["Churn Ensemble"]
+    registry --> segment["K-Means Segmenter"]
+    registry --> recommend["Collaborative Recommender"]
+    artifacts["Local models/ or AWS S3"] --> registry
+    train["Training Pipeline"] --> artifacts
+    train --> mlflow["MLflow Tracking"]
+    github["GitHub Actions"] --> ecr["Amazon ECR"]
+    ecr --> apprunner["AWS App Runner"]
+```
+
+## Tech Stack
+
+- **API:** FastAPI, Uvicorn, Pydantic
+- **ML/data:** Pandas, NumPy, scikit-learn, XGBoost, SciPy
+- **Model storage:** joblib artifacts
+- **Experiment tracking:** MLflow
+- **Testing:** pytest, FastAPI TestClient
+- **Containerization:** Docker
+- **Cloud target:** AWS S3, ECR, App Runner
+- **CI/CD:** GitHub Actions
+
+## ML Models
+
+### Churn Prediction
+
+The churn endpoint uses a supervised classification ensemble:
+
+- XGBoost classifier when available
+- scikit-learn MLP neural network
+- weighted average of both model probabilities
+
+Training uses time-based churn labels. The pipeline builds customer features from behavior before a cutoff date, then checks whether the customer returned in the next prediction window. This avoids the shortcut of simply labeling churn from current `recency_days`.
+
+### Customer Segmentation
+
+The segmentation endpoint uses K-Means clustering on customer-level behavior features. Cluster IDs are mapped into readable business labels:
+
+- `high-value`
+- `at-risk`
+- `new`
+- `dormant`
+
+### Product Recommendations
+
+The recommendation endpoint uses collaborative filtering over customer-product purchase history. It builds an interaction matrix and uses Truncated SVD to learn product/customer similarity patterns.
+
+## Current Model Metrics
+
+The latest trained model artifacts were generated from `data/online_retail_cleaned.csv`.
+
+| Metric | Value |
+| --- | ---: |
+| Churn ROC AUC | `0.7916` |
+| Churn average precision | `0.8232` |
+| Churn accuracy | `0.7372` |
+| Segmentation silhouette | `0.4061` |
+| Recommender products | `4,631` |
+| Recommender customers | `5,878` |
+| Churn training rows | `30,823` |
+| Churn training customers | `5,281` |
+
+## Project Structure
+
+```text
+app/
+  main.py                 FastAPI app and endpoint routing
+  schemas.py              Pydantic request/response contracts
+  config.py               Environment-based settings
+  ml/
+    artifacts.py          Local, S3, and GCS artifact loading
+    churn.py              Churn ensemble wrapper
+    demo.py               Demo artifact generation
+    features.py           Data cleaning and feature engineering
+    recommender.py        Collaborative filtering recommender
+    registry.py           Model loading and registry
+    segmentation.py       K-Means prediction wrapper
+scripts/
+  train.py                Main ML training pipeline
+  create_demo_artifacts.py
+tests/
+  test_api.py
+  test_features.py
+  test_registry.py
+  test_recommender.py
+examples/
+  churn_request.json
+  segment_request.json
+  recommend_request.json
+  health_response.json
+docs/
+  aws-deployment.md
+Dockerfile
+requirements.txt
+requirements-dev.txt
+```
 
 ## Local Setup
 
+Use Python `3.11`. Some ML packages may not have stable wheels for newer Python versions.
+
 ```powershell
-python -m venv .venv
+cd "C:\Users\azadh\OneDrive\Documents\ecommerceAPI"
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt -r requirements-dev.txt
-python -m scripts.create_demo_artifacts
-uvicorn app.main:app --reload
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-Open `http://127.0.0.1:8000/docs` for Swagger.
+## Run The API Locally
+
+Use demo models:
+
+```powershell
+python -m scripts.create_demo_artifacts
+python -m uvicorn app.main:app --reload
+```
+
+Use real trained models:
+
+```powershell
+$env:CI_MODEL_DIR="models"
+$env:CI_ALLOW_DEMO_MODELS="false"
+python -m uvicorn app.main:app --reload
+```
+
+Open Swagger UI:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Check:
+
+```text
+GET /health
+```
+
+For real models, `/health` should show:
+
+```json
+"demo_mode": false
+```
 
 ## Train Real Models
 
-1. Download the Online Retail II dataset from Kaggle.
-2. Put the file at `data/online_retail_II.xlsx` or pass your own path.
-3. Run:
+The current training dataset is:
 
-```powershell
-python -m scripts.train --transactions data/online_retail_II.xlsx --output-dir models
+```text
+data/online_retail_cleaned.csv
 ```
 
-For the cleaned CSV currently used in this project:
+Run:
 
 ```powershell
 python -m scripts.train --transactions data\online_retail_cleaned.csv --output-dir models
 ```
 
-The churn model is trained with time-based snapshots: it builds customer features from behavior before each cutoff date, then labels churn from whether the customer returns in the next prediction window. The trainer logs MLflow metrics locally under `mlruns/` and writes:
-
-- `models/churn_model.joblib`
-- `models/segment_model.joblib`
-- `models/recommender.joblib`
-- `models/metadata.json`
-
-During training, the script prints progress like:
+The trainer prints progress:
 
 ```text
 [1/8] Loading transactions...
@@ -57,14 +190,41 @@ During training, the script prints progress like:
 [8/8] Training collaborative filtering recommender and saving artifacts...
 ```
 
+Generated artifacts:
+
+```text
+models/churn_model.joblib
+models/segment_model.joblib
+models/recommender.joblib
+models/metadata.json
+```
+
+## MLflow Tracking
+
+Start MLflow UI:
+
+```powershell
+python -m mlflow ui --backend-store-uri mlruns --port 5000
+```
+
+Open:
+
+```text
+http://127.0.0.1:5000
+```
+
+MLflow tracks parameters, metrics, and model artifacts for each training run.
+
 ## Example Requests
 
-Ready-to-copy request examples are also available in:
+Ready-to-copy examples:
 
 - `examples/churn_request.json`
 - `examples/segment_request.json`
 - `examples/recommend_request.json`
 - `examples/health_response.json`
+
+Churn:
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/predict/churn `
@@ -72,36 +232,102 @@ curl -X POST http://127.0.0.1:8000/predict/churn `
   -d "{\"customer\":{\"customer_id\":\"17850\",\"recency_days\":22,\"frequency\":18,\"monetary\":3420.5,\"tenure_days\":340,\"avg_order_value\":190.03,\"total_items\":620,\"unique_products\":47}}"
 ```
 
+Recommendation:
+
 ```powershell
 curl -X POST http://127.0.0.1:8000/recommend `
   -H "Content-Type: application/json" `
-  -d "{\"customer_id\":\"17850\",\"recent_product_ids\":[\"85123A\",\"71053\"],\"top_n\":5}"
+  -d "{\"customer_id\":\"17850\",\"recent_product_ids\":[\"85123A\",\"71053\"],\"top_n\":5,\"include_seen\":false}"
 ```
 
-## AWS Deployment
+## Tests
 
-The production workflow uses AWS App Runner, ECR, and S3:
-
-- GitHub Actions runs tests on every push and pull request.
-- Docker images are pushed to Amazon ECR.
-- Trained model artifacts are loaded from Amazon S3.
-- AWS App Runner serves the public HTTPS API.
-
-Store artifacts in S3 and set:
+Run:
 
 ```powershell
-aws s3 cp models/ s3://YOUR_BUCKET_NAME/customer-intelligence/models/ --recursive
+python -m pytest
 ```
 
-Runtime environment variables:
+Current local result:
 
-- `CI_MODEL_ARTIFACT_URI=s3://YOUR_BUCKET_NAME/customer-intelligence/models/`
-- `CI_ALLOW_DEMO_MODELS=false`
+```text
+12 passed
+```
 
-Full step-by-step setup is in `docs/aws-deployment.md`.
+The tests cover:
 
-## Production Notes
+- API contracts
+- invalid request validation
+- data cleaning aliases
+- time-based churn labels
+- model registry metadata
+- recommender fallback behavior
 
-- Keep `CI_ALLOW_DEMO_MODELS=false` in production so missing artifacts fail fast.
-- Use AWS IAM permissions for S3 model artifact reads.
-- The included neural model uses `sklearn.neural_network.MLPClassifier` to keep the container lightweight. You can swap it for TensorFlow/Keras later without changing the API contract.
+## Docker
+
+Build:
+
+```powershell
+docker build -t customer-intelligence-api:local .
+```
+
+Run with real local model artifacts:
+
+```powershell
+docker run --rm -p 8080:8080 -e CI_MODEL_DIR=/app/models -e CI_ALLOW_DEMO_MODELS=false -v "C:\Users\azadh\OneDrive\Documents\ecommerceAPI\models:/app/models:ro" customer-intelligence-api:local
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080/docs
+```
+
+## AWS Deployment Status
+
+AWS deployment is prepared but currently paused while the AWS account finishes CloudShell verification.
+
+Completed:
+
+- S3 bucket created
+- Model artifacts uploaded to:
+
+```text
+s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+```
+
+Prepared:
+
+- GitHub Actions AWS workflow in `.github/workflows/deploy.yml`
+- AWS deployment guide in `docs/aws-deployment.md`
+
+Remaining:
+
+- Create IAM roles
+- Add GitHub secrets
+- Push Docker image to ECR
+- Create AWS App Runner service
+- Verify public `/health` and `/docs`
+
+## Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `CI_MODEL_DIR` | Local directory where models are loaded from |
+| `CI_MODEL_ARTIFACT_URI` | Optional cloud artifact path, such as `s3://bucket/prefix/` |
+| `CI_ALLOW_DEMO_MODELS` | Allows fallback demo artifacts when real artifacts are missing |
+| `CI_CORS_ORIGINS` | Allowed CORS origins |
+
+Production should use:
+
+```text
+CI_ALLOW_DEMO_MODELS=false
+CI_MODEL_ARTIFACT_URI=s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+```
+
+## Notes
+
+- `data/`, `models/`, `.venv/`, and `mlruns/` are intentionally ignored by Git.
+- Model files are stored locally for development and in S3 for deployment.
+- The API loads trained models once at startup through `ModelRegistry`.
+- Training is offline; prediction happens online through FastAPI endpoints.

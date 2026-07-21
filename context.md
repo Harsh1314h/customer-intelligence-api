@@ -15,7 +15,9 @@ Current status:
 - Tests pass.
 - Docker build and Docker run work locally.
 - GitHub repository is connected.
-- AWS deployment files have been prepared, but actual AWS deployment is paused.
+- AWS deployment files have been prepared, but actual AWS deployment is paused until account verification enables CloudShell.
+- S3 model artifact upload is complete:
+  - `s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/`
 - Phase 1 cleanup work has been started and mostly implemented:
   - training progress logs added
   - example request/response files added
@@ -28,6 +30,9 @@ Current status:
   - Docker was repaired and reported working in the user terminal
   - source/docs/tests/examples were committed in `5c22730`
   - `main` was pushed to `https://github.com/Harsh1314h/customer-intelligence-api.git`
+- Portfolio documentation polish has been started:
+  - README rewritten with architecture, tech stack, endpoints, setup, ML metrics, Docker, tests, and AWS status
+  - `docs/model-card.md` added
 
 GitHub remote:
 
@@ -77,6 +82,7 @@ examples/
 
 docs/
   aws-deployment.md       AWS deployment guide
+  model-card.md           ML model summary, metrics, limitations, and intended use
 
 models/
   churn_model.joblib      Trained churn model
@@ -398,7 +404,16 @@ AWS deployment target:
 - AWS App Runner for hosted API.
 - GitHub Actions for CI/CD.
 
-AWS deployment is not completed yet. It is intentionally paused while learning the project.
+AWS deployment is not completed yet. It is paused because AWS CloudShell is blocked by new-account verification.
+
+Completed AWS preparation:
+
+- S3 bucket created.
+- Model artifacts uploaded to:
+
+```text
+s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+```
 
 ## Common Commands Used
 
@@ -902,9 +917,10 @@ git status --short
 
 ## Next Best Step
 
-Before continuing AWS deployment, the best next step is repairing local validation:
+Before continuing AWS deployment:
 
-1. Confirm the GitHub Actions run status on GitHub.
-2. Move to AWS model storage preparation.
-3. Create S3 bucket and upload model artifacts.
-4. Prepare AWS IAM roles for App Runner and GitHub Actions.
+1. Commit and push the README/model-card documentation polish.
+2. Confirm GitHub Actions status on GitHub.
+3. Wait for AWS CloudShell verification to finish.
+4. Create IAM roles for App Runner and GitHub Actions.
+5. Add GitHub secrets and deploy to App Runner.
