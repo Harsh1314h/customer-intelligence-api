@@ -21,12 +21,13 @@ Current status:
   - example request/response files added
   - stronger tests added
   - README updated with training output and examples
-- Phase 2 GitHub finalization is partially checked but blocked:
+- Phase 2 GitHub finalization is complete:
   - `.gitignore` correctly ignores local-heavy folders
   - Git works when bypassing the broken global config with `GIT_CONFIG_GLOBAL=NUL`
   - Python 3.11 tests were repaired in the user terminal and passed with `12 passed`
   - Docker was repaired and reported working in the user terminal
-  - Codex shell still has stale PATH/Python visibility, so final validation evidence is user terminal output plus Git checks from Codex
+  - source/docs/tests/examples were committed in `5c22730`
+  - `main` was pushed to `https://github.com/Harsh1314h/customer-intelligence-api.git`
 
 GitHub remote:
 
@@ -903,7 +904,7 @@ git status --short
 
 Before continuing AWS deployment, the best next step is repairing local validation:
 
-1. Commit the stable source files.
-2. Push to GitHub.
-3. Confirm GitHub contains code/docs/tests and excludes local-heavy folders.
-4. Move to AWS model storage preparation.
+1. Confirm the GitHub Actions run status on GitHub.
+2. Move to AWS model storage preparation.
+3. Create S3 bucket and upload model artifacts.
+4. Prepare AWS IAM roles for App Runner and GitHub Actions.
