@@ -109,4 +109,4 @@ The API is intended for portfolio and learning use as an example of:
 - Add model monitoring.
 - Add stronger recommendation evaluation metrics.
 - Add richer product/customer features.
-- Deploy and verify the public AWS App Runner API.
+- Deploy and verify the public AWS ECS Express API.

@@ -4,130 +4,114 @@ This project deploys to AWS with:
 
 - Amazon ECR for the Docker image.
 - Amazon S3 for trained model artifacts.
-- AWS App Runner for the public HTTPS API.
+- Amazon ECS Express Mode for the public container service.
 - GitHub Actions with AWS OIDC for CI/CD.
 
-The default region used by the workflow is `ap-south-1`.
+Important: AWS App Runner is no longer accepting new customers after April 30, 2026, so this project now uses ECS Express Mode instead.
 
-## 0. Where To Run These Commands
+Default region:
 
-There are three different places involved:
+```text
+ap-south-1
+```
 
-- **Local PowerShell on your laptop:** project commands like `git`, `docker`, `python`, and `pytest`.
-- **AWS CloudShell in your AWS account:** AWS commands like `aws s3`, `aws iam`, `aws ecr`, and `aws apprunner`.
-- **GitHub website:** repository secrets for GitHub Actions.
+## Current AWS Assets
 
-If your local PowerShell says `aws` is not recognized, that is fine. Open AWS in your browser, sign in, and click the CloudShell icon in the top navigation bar. CloudShell already has the AWS CLI installed and authenticated for your account.
+S3 model artifacts:
 
-You only need to install AWS CLI locally if you want to run AWS commands from your own PowerShell.
+```text
+s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+```
 
-## 1. Choose Names
+AWS account:
 
-Use these values unless you want custom names:
+```text
+188947281989
+```
+
+GitHub repository:
+
+```text
+Harsh1314h/customer-intelligence-api
+```
+
+## GitHub Secrets Needed
+
+Add these in:
+
+```text
+GitHub repo > Settings > Secrets and variables > Actions
+```
+
+Required secrets:
+
+```text
+AWS_ROLE_TO_ASSUME
+CI_MODEL_ARTIFACT_URI
+ECS_TASK_EXECUTION_ROLE_ARN
+ECS_INFRASTRUCTURE_ROLE_ARN
+```
+
+Values:
+
+```text
+CI_MODEL_ARTIFACT_URI=s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+```
+
+`AWS_ROLE_TO_ASSUME` is the GitHub Actions deploy role ARN.
+
+`ECS_TASK_EXECUTION_ROLE_ARN` is the ECS task role/execution role ARN.
+
+`ECS_INFRASTRUCTURE_ROLE_ARN` is the ECS infrastructure role ARN.
+
+## 1. Create ECR Repository
+
+Run from local PowerShell after `aws configure`:
 
 ```powershell
 $env:AWS_REGION="ap-south-1"
-$env:APP_NAME="customer-intelligence-api"
-$env:MODEL_BUCKET="customer-intelligence-models-YOUR_UNIQUE_SUFFIX"
+aws ecr create-repository --repository-name customer-intelligence-api --region $env:AWS_REGION --image-scanning-configuration scanOnPush=true
 ```
 
-S3 bucket names must be globally unique. Replace `YOUR_UNIQUE_SUFFIX` with something like your GitHub username.
+If the repository already exists, continue.
 
-## 2. Upload Model Artifacts To S3
+## 2. Create ECS Task Execution Role
 
-Run this from the project root after training:
+Create the ECS task trust policy:
 
 ```powershell
-aws s3 mb "s3://$env:MODEL_BUCKET" --region "$env:AWS_REGION"
-aws s3 cp models/ "s3://$env:MODEL_BUCKET/customer-intelligence/models/" --recursive
-```
-
-Your model artifact URI will be:
-
-```text
-s3://YOUR_BUCKET/customer-intelligence/models/
-```
-
-## 3. Create The ECR Repository
-
-The GitHub workflow can create this automatically, but creating it once upfront is also fine:
-
-```powershell
-aws ecr create-repository `
-  --repository-name customer-intelligence-api `
-  --region "$env:AWS_REGION" `
-  --image-scanning-configuration scanOnPush=true
-```
-
-## 4. Create App Runner ECR Access Role
-
-App Runner needs this role to pull private images from ECR.
-
-Create `apprunner-trust-policy.json`:
-
-```json
+@'
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Principal": {
-        "Service": "build.apprunner.amazonaws.com"
+        "Service": "ecs-tasks.amazonaws.com"
       },
       "Action": "sts:AssumeRole"
     }
   ]
 }
+'@ | Set-Content ecs-task-trust-policy.json
 ```
 
-Run:
+Create role:
 
 ```powershell
-aws iam create-role `
-  --role-name AppRunnerECRAccessRole `
-  --assume-role-policy-document file://apprunner-trust-policy.json
-
-aws iam attach-role-policy `
-  --role-name AppRunnerECRAccessRole `
-  --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
-
-aws iam get-role --role-name AppRunnerECRAccessRole --query "Role.Arn" --output text
+aws iam create-role --role-name CustomerIntelligenceECSTaskExecutionRole --assume-role-policy-document file://ecs-task-trust-policy.json
 ```
 
-Save the returned ARN. It becomes the GitHub secret `APP_RUNNER_ACCESS_ROLE_ARN`.
-
-## 5. Create App Runner Instance Role
-
-The running API needs this role to read model files from S3.
-
-Create `apprunner-instance-trust-policy.json`:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "tasks.apprunner.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-```
-
-Create the role:
+Attach ECS execution policy:
 
 ```powershell
-aws iam create-role `
-  --role-name CustomerIntelligenceAppRunnerInstanceRole `
-  --assume-role-policy-document file://apprunner-instance-trust-policy.json
+aws iam attach-role-policy --role-name CustomerIntelligenceECSTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 ```
 
-Create `model-bucket-policy.json`, replacing `YOUR_BUCKET`:
+Create S3 model-read policy:
 
-```json
+```powershell
+@'
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -138,72 +122,86 @@ Create `model-bucket-policy.json`, replacing `YOUR_BUCKET`:
         "s3:ListBucket"
       ],
       "Resource": [
-        "arn:aws:s3:::YOUR_BUCKET",
-        "arn:aws:s3:::YOUR_BUCKET/customer-intelligence/models/*"
+        "arn:aws:s3:::customer-intelligence-models-harsh1314h",
+        "arn:aws:s3:::customer-intelligence-models-harsh1314h/customer-intelligence/models/*"
       ]
     }
   ]
 }
+'@ | Set-Content ecs-model-bucket-policy.json
 ```
 
-Attach it:
+Attach S3 model-read policy:
 
 ```powershell
-aws iam put-role-policy `
-  --role-name CustomerIntelligenceAppRunnerInstanceRole `
-  --policy-name CustomerIntelligenceModelReadPolicy `
-  --policy-document file://model-bucket-policy.json
-
-aws iam get-role --role-name CustomerIntelligenceAppRunnerInstanceRole --query "Role.Arn" --output text
+aws iam put-role-policy --role-name CustomerIntelligenceECSTaskExecutionRole --policy-name CustomerIntelligenceModelReadPolicy --policy-document file://ecs-model-bucket-policy.json
 ```
 
-Save the returned ARN for the App Runner service creation step.
+Get role ARN:
 
-## 6. Create GitHub Actions Deploy Role
+```powershell
+aws iam get-role --role-name CustomerIntelligenceECSTaskExecutionRole --query "Role.Arn" --output text
+```
 
-This role lets GitHub Actions push to ECR and update App Runner without storing AWS access keys.
+Use this as GitHub secret:
 
-In AWS IAM, create an OIDC identity provider for GitHub if your AWS account does not already have one:
+```text
+ECS_TASK_EXECUTION_ROLE_ARN
+```
 
-- Provider URL: `https://token.actions.githubusercontent.com`
-- Audience: `sts.amazonaws.com`
+## 3. Create ECS Infrastructure Role
 
-Create `github-actions-trust-policy.json`, replacing `AWS_ACCOUNT_ID` and `Harsh1314h/customer-intelligence-api` if needed:
+Create trust policy:
 
-```json
+```powershell
+@'
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::AWS_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+        "Service": "ecs.amazonaws.com"
       },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:Harsh1314h/customer-intelligence-api:*"
-        }
-      }
+      "Action": "sts:AssumeRole"
     }
   ]
 }
+'@ | Set-Content ecs-infrastructure-trust-policy.json
 ```
 
-Create the role:
+Create role:
 
 ```powershell
-aws iam create-role `
-  --role-name GitHubActionsCustomerIntelligenceDeployRole `
-  --assume-role-policy-document file://github-actions-trust-policy.json
+aws iam create-role --role-name CustomerIntelligenceECSInfrastructureRole --assume-role-policy-document file://ecs-infrastructure-trust-policy.json
 ```
 
-Create `github-actions-deploy-policy.json`, replacing `AWS_ACCOUNT_ID`:
+Attach managed infrastructure role policy:
 
-```json
+```powershell
+aws iam attach-role-policy --role-name CustomerIntelligenceECSInfrastructureRole --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+```
+
+Get role ARN:
+
+```powershell
+aws iam get-role --role-name CustomerIntelligenceECSInfrastructureRole --query "Role.Arn" --output text
+```
+
+Use this as GitHub secret:
+
+```text
+ECS_INFRASTRUCTURE_ROLE_ARN
+```
+
+## 4. Update GitHub Actions Deploy Role
+
+The GitHub role must be allowed to push to ECR, deploy ECS Express services, and pass the ECS roles.
+
+Create/update policy:
+
+```powershell
+@'
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -224,90 +222,71 @@ Create `github-actions-deploy-policy.json`, replacing `AWS_ACCOUNT_ID`:
     {
       "Effect": "Allow",
       "Action": [
-        "apprunner:UpdateService",
-        "apprunner:DescribeService",
-        "iam:PassRole"
+        "ecs:CreateCluster",
+        "ecs:DescribeClusters",
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:CreateService",
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:TagResource",
+        "ecs:ListServices"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::188947281989:role/CustomerIntelligenceECSTaskExecutionRole",
+        "arn:aws:iam::188947281989:role/CustomerIntelligenceECSInfrastructureRole"
+      ]
     }
   ]
 }
+'@ | Set-Content github-actions-deploy-policy.json
 ```
 
-Attach it:
+Attach policy:
 
 ```powershell
-aws iam put-role-policy `
-  --role-name GitHubActionsCustomerIntelligenceDeployRole `
-  --policy-name CustomerIntelligenceDeployPolicy `
-  --policy-document file://github-actions-deploy-policy.json
-
-aws iam get-role --role-name GitHubActionsCustomerIntelligenceDeployRole --query "Role.Arn" --output text
+aws iam put-role-policy --role-name GitHubActionsCustomerIntelligenceDeployRole --policy-name CustomerIntelligenceDeployPolicy --policy-document file://github-actions-deploy-policy.json
 ```
 
-Save the returned ARN. It becomes the GitHub secret `AWS_ROLE_TO_ASSUME`.
+## 5. Deploy
 
-## 7. Create The First App Runner Service
-
-The GitHub workflow updates App Runner after the service exists. For the first deployment, add only the `AWS_ROLE_TO_ASSUME` GitHub secret and push to `main`; the workflow will build and push the first image to ECR, then skip the App Runner update because `APP_RUNNER_SERVICE_ARN` does not exist yet.
-
-After that first image exists in ECR, create the App Runner service manually.
-
-In the AWS console:
-
-1. Open App Runner.
-2. Create service.
-3. Source: Container registry.
-4. Provider: Amazon ECR.
-5. Choose `customer-intelligence-api`.
-6. Port: `8080`.
-7. Environment variables:
-   - `CI_MODEL_ARTIFACT_URI=s3://YOUR_BUCKET/customer-intelligence/models/`
-   - `CI_ALLOW_DEMO_MODELS=false`
-8. Access role: `AppRunnerECRAccessRole`.
-9. Instance role: `CustomerIntelligenceAppRunnerInstanceRole`.
-
-After creation, copy the App Runner service ARN. It becomes the GitHub secret `APP_RUNNER_SERVICE_ARN`.
-
-## 8. Add GitHub Secrets
-
-Go to GitHub repo settings:
-
-`Settings > Secrets and variables > Actions > New repository secret`
-
-Add:
-
-- `AWS_ROLE_TO_ASSUME`
-- `APP_RUNNER_SERVICE_ARN`
-- `APP_RUNNER_ACCESS_ROLE_ARN`
-- `CI_MODEL_ARTIFACT_URI`
-
-Example `CI_MODEL_ARTIFACT_URI`:
+Add/confirm GitHub secrets:
 
 ```text
-s3://YOUR_BUCKET/customer-intelligence/models/
+AWS_ROLE_TO_ASSUME=arn:aws:iam::188947281989:role/GitHubActionsCustomerIntelligenceDeployRole
+CI_MODEL_ARTIFACT_URI=s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+ECS_TASK_EXECUTION_ROLE_ARN=arn:aws:iam::188947281989:role/CustomerIntelligenceECSTaskExecutionRole
+ECS_INFRASTRUCTURE_ROLE_ARN=arn:aws:iam::188947281989:role/CustomerIntelligenceECSInfrastructureRole
 ```
 
-## 9. Deploy
+Push to `main` or rerun GitHub Actions.
 
-Push to `main`:
-
-```powershell
-git add .
-git commit -m "Deploy customer intelligence API on AWS"
-git push origin main
-```
-
-GitHub Actions will:
+The workflow will:
 
 1. Run tests.
-2. Build the Docker image.
-3. Push it to ECR.
-4. Update App Runner.
+2. Build Docker image.
+3. Push image to ECR.
+4. Deploy or update the ECS Express service.
 
-After App Runner finishes deploying, open the service URL and test:
+## 6. Verify
+
+After GitHub Actions succeeds, open the service endpoint shown in the ECS console and test:
 
 ```text
 /health
 /docs
+```
+
+Expected `/health` result includes:
+
+```json
+"demo_mode": false
 ```

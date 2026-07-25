@@ -27,7 +27,7 @@ flowchart LR
     train["Training Pipeline"] --> artifacts
     train --> mlflow["MLflow Tracking"]
     github["GitHub Actions"] --> ecr["Amazon ECR"]
-    ecr --> apprunner["AWS App Runner"]
+    ecr --> ecs["Amazon ECS Express Mode"]
 ```
 
 ## Tech Stack
@@ -38,7 +38,7 @@ flowchart LR
 - **Experiment tracking:** MLflow
 - **Testing:** pytest, FastAPI TestClient
 - **Containerization:** Docker
-- **Cloud target:** AWS S3, ECR, App Runner
+- **Cloud target:** AWS S3, ECR, ECS Express Mode
 - **CI/CD:** GitHub Actions
 
 ## ML Models
@@ -285,7 +285,7 @@ http://127.0.0.1:8080/docs
 
 ## AWS Deployment Status
 
-AWS deployment is prepared but currently paused while the AWS account finishes CloudShell verification.
+AWS deployment uses ECS Express Mode because AWS App Runner is no longer accepting new customers after April 30, 2026.
 
 Completed:
 
@@ -303,10 +303,10 @@ Prepared:
 
 Remaining:
 
-- Create IAM roles
+- Create ECS IAM roles
 - Add GitHub secrets
 - Push Docker image to ECR
-- Create AWS App Runner service
+- Deploy AWS ECS Express service
 - Verify public `/health` and `/docs`
 
 ## Environment Variables

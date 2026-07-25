@@ -13,3 +13,6 @@ apprunner-instance-trust-policy.json
 github-actions-trust-policy.json
 github-actions-deploy-policy.json
 model-bucket-policy.json
+ecs-task-trust-policy.json
+ecs-model-bucket-policy.json
+ecs-infrastructure-trust-policy.json

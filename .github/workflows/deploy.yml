@@ -1,4 +1,4 @@
-name: Test, Build, and Deploy to AWS
+name: Test, Build, and Deploy to AWS ECS
 
 on:
   push:
@@ -15,6 +15,7 @@ env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: customer-intelligence-api
   SERVICE_NAME: customer-intelligence-api
+  ECS_CLUSTER: default
 
 jobs:
   test:
@@ -38,9 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-      APP_RUNNER_SERVICE_ARN: ${{ secrets.APP_RUNNER_SERVICE_ARN }}
-      APP_RUNNER_ACCESS_ROLE_ARN: ${{ secrets.APP_RUNNER_ACCESS_ROLE_ARN }}
       CI_MODEL_ARTIFACT_URI: ${{ secrets.CI_MODEL_ARTIFACT_URI }}
+      ECS_TASK_EXECUTION_ROLE_ARN: ${{ secrets.ECS_TASK_EXECUTION_ROLE_ARN }}
+      ECS_INFRASTRUCTURE_ROLE_ARN: ${{ secrets.ECS_INFRASTRUCTURE_ROLE_ARN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,43 +73,26 @@ jobs:
           docker push "$IMAGE_URI"
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
-      - name: Update App Runner service
+      - name: Deploy ECS Express service
+        if: env.ECS_TASK_EXECUTION_ROLE_ARN != '' && env.ECS_INFRASTRUCTURE_ROLE_ARN != '' && env.CI_MODEL_ARTIFACT_URI != ''
+        uses: aws-actions/amazon-ecs-deploy-express-service@v1
+        with:
+          service-name: ${{ env.SERVICE_NAME }}
+          image: ${{ env.IMAGE_URI }}
+          execution-role-arn: ${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}
+          infrastructure-role-arn: ${{ env.ECS_INFRASTRUCTURE_ROLE_ARN }}
+          task-role-arn: ${{ env.ECS_TASK_EXECUTION_ROLE_ARN }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          container-port: 8080
+          cpu: 256
+          memory: 512
+          environment-variables: '[{"name":"CI_MODEL_ARTIFACT_URI","value":"${{ env.CI_MODEL_ARTIFACT_URI }}"},{"name":"CI_ALLOW_DEMO_MODELS","value":"false"}]'
+          health-check-path: /health
+
+      - name: Print deployment summary
         run: |
-          if [ -z "$APP_RUNNER_SERVICE_ARN" ]; then
-            echo "APP_RUNNER_SERVICE_ARN is not set yet. Image was pushed to ECR; create App Runner, add the secret, then push again."
-            exit 0
+          echo "ECS Express deployment requested for $SERVICE_NAME"
+          echo "Image: $IMAGE_URI"
+          if [ -z "$ECS_TASK_EXECUTION_ROLE_ARN" ] || [ -z "$ECS_INFRASTRUCTURE_ROLE_ARN" ] || [ -z "$CI_MODEL_ARTIFACT_URI" ]; then
+            echo "ECS Express deployment skipped because ECS secrets are not fully configured yet."
           fi
-
-          if [ -z "$APP_RUNNER_ACCESS_ROLE_ARN" ]; then
-            echo "APP_RUNNER_ACCESS_ROLE_ARN is required so App Runner can pull from private ECR."
-            exit 1
-          fi
-
-          if [ -z "$CI_MODEL_ARTIFACT_URI" ]; then
-            echo "CI_MODEL_ARTIFACT_URI is required, for example s3://bucket/customer-intelligence/models/"
-            exit 1
-          fi
-
-          cat > source-configuration.json <<EOF
-          {
-            "ImageRepository": {
-              "ImageIdentifier": "$IMAGE_URI",
-              "ImageRepositoryType": "ECR",
-              "ImageConfiguration": {
-                "Port": "8080",
-                "RuntimeEnvironmentVariables": {
-                  "CI_MODEL_ARTIFACT_URI": "$CI_MODEL_ARTIFACT_URI",
-                  "CI_ALLOW_DEMO_MODELS": "false"
-                }
-              }
-            },
-            "AuthenticationConfiguration": {
-              "AccessRoleArn": "$APP_RUNNER_ACCESS_ROLE_ARN"
-            },
-            "AutoDeploymentsEnabled": false
-          }
-          EOF
-
-          aws apprunner update-service \
-            --service-arn "$APP_RUNNER_SERVICE_ARN" \
-            --source-configuration file://source-configuration.json

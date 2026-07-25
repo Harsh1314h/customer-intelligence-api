@@ -15,7 +15,7 @@ Current status:
 - Tests pass.
 - Docker build and Docker run work locally.
 - GitHub repository is connected.
-- AWS deployment files have been prepared, but actual AWS deployment is paused until account verification enables CloudShell.
+- AWS deployment files have been pivoted from App Runner to ECS Express Mode because App Runner is no longer accepting new customers after April 30, 2026.
 - S3 model artifact upload is complete:
   - `s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/`
 - Phase 1 cleanup work has been started and mostly implemented:
@@ -33,6 +33,10 @@ Current status:
 - Portfolio documentation polish has been started:
   - README rewritten with architecture, tech stack, endpoints, setup, ML metrics, Docker, tests, and AWS status
   - `docs/model-card.md` added
+- GitHub Actions test import failure was fixed:
+  - added `pytest.ini` with `pythonpath = .`
+  - ignored local AWS policy JSON helper files in `.gitignore`
+- AWS CLI is configured locally as `arn:aws:iam::188947281989:user/customer-intelligence-admin`, so deployment can continue from local PowerShell instead of CloudShell.
 
 GitHub remote:
 
@@ -401,10 +405,10 @@ AWS deployment target:
 
 - Amazon ECR for Docker image.
 - Amazon S3 for model artifacts.
-- AWS App Runner for hosted API.
+- Amazon ECS Express Mode for hosted API.
 - GitHub Actions for CI/CD.
 
-AWS deployment is not completed yet. It is paused because AWS CloudShell is blocked by new-account verification.
+AWS deployment is not completed yet. App Runner was blocked for new customers, so deployment has pivoted to ECS Express Mode.
 
 Completed AWS preparation:
 
@@ -736,8 +740,8 @@ metadata.json
 ```
 
 - Create ECR repository.
-- Create IAM role for App Runner to pull from ECR.
-- Create IAM role for App Runner runtime to read from S3.
+- Create ECS task execution role to pull from ECR and read S3 model artifacts.
+- Create ECS infrastructure role for ECS Express Mode.
 - Create GitHub Actions deploy role.
 - Add first GitHub secret:
 
@@ -754,13 +758,13 @@ Completion criteria:
 
 Goal:
 
-Deploy the API publicly on AWS App Runner.
+Deploy the API publicly on AWS ECS Express Mode.
 
 Tasks:
 
 - Push workflow to GitHub.
 - Let GitHub Actions build image and push to ECR.
-- Create App Runner service from the ECR image.
+- Deploy ECS Express service from the ECR image.
 - Configure environment variables:
 
 ```text
@@ -771,8 +775,8 @@ CI_ALLOW_DEMO_MODELS=false
 - Add remaining GitHub secrets:
 
 ```text
-APP_RUNNER_SERVICE_ARN
-APP_RUNNER_ACCESS_ROLE_ARN
+ECS_TASK_EXECUTION_ROLE_ARN
+ECS_INFRASTRUCTURE_ROLE_ARN
 CI_MODEL_ARTIFACT_URI
 ```
 
@@ -780,15 +784,15 @@ CI_MODEL_ARTIFACT_URI
 - Test deployed API:
 
 ```text
-https://YOUR_APP_RUNNER_URL/health
-https://YOUR_APP_RUNNER_URL/docs
+https://YOUR_ECS_EXPRESS_URL/health
+https://YOUR_ECS_EXPRESS_URL/docs
 ```
 
 Completion criteria:
 
 - Public API is live.
 - `/health` shows real models loaded.
-- Swagger UI works from App Runner URL.
+- Swagger UI works from the ECS Express service URL.
 
 ### Phase 9 - Resume And Portfolio Polish
 
@@ -812,10 +816,10 @@ Tasks:
   - why Docker
   - why MLflow
   - why time-based churn labels
-  - why S3/ECR/App Runner
+  - why S3/ECR/ECS Express Mode
 - Add final architecture diagram showing:
   - client
-  - App Runner
+  - ECS Express Mode
   - FastAPI
   - model registry
   - S3 model artifacts
@@ -883,11 +887,11 @@ Remaining AWS tasks:
 2. Open AWS CloudShell.
 3. Create S3 bucket.
 4. Upload model files to S3.
-5. Create IAM roles for App Runner and GitHub Actions.
+5. Create IAM roles for ECS Express Mode and GitHub Actions.
 6. Add GitHub repository secrets.
 7. Push workflow to GitHub.
 8. Let GitHub Actions build and push Docker image to ECR.
-9. Create App Runner service.
+9. Deploy ECS Express service.
 10. Test deployed `/health` and `/docs`.
 
 ## Known Notes And Issues
@@ -903,6 +907,7 @@ This is a local Git configuration issue, not an application code issue.
 - On 2026-07-21, `.venv` could not run tests from the Codex shell because it pointed to a Python 3.11 executable that was not visible to that shell. On 2026-07-22, the user recreated the environment and ran `python -m pytest` successfully with `12 passed`.
 - On 2026-07-21, `docker version` reported `docker` was not recognized in the Codex shell. On 2026-07-22, the user reported Docker is working locally after fixing Docker Desktop.
 - On 2026-07-21, `.gitignore` was verified with `git check-ignore`; `data/`, `models/`, `mlruns/`, and `.venv/` are ignored correctly.
+- On 2026-07-25, GitHub Actions failed during pytest collection because Linux CI could not import the local `app` package from new tests. Fixed by adding `pytest.ini` with `pythonpath = .` and pushed commit `cbbf65c`.
 - Git commands can currently be run by bypassing the broken global config for the command:
 
 ```powershell
@@ -921,6 +926,6 @@ Before continuing AWS deployment:
 
 1. Commit and push the README/model-card documentation polish.
 2. Confirm GitHub Actions status on GitHub.
-3. Wait for AWS CloudShell verification to finish.
-4. Create IAM roles for App Runner and GitHub Actions.
-5. Add GitHub secrets and deploy to App Runner.
+3. Create ECS Express IAM roles.
+4. Add ECS GitHub secrets.
+5. Deploy to ECS Express Mode.
