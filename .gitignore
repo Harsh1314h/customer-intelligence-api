@@ -8,3 +8,8 @@ data/
 models/
 mlruns/
 *.egg-info/
+apprunner-trust-policy.json
+apprunner-instance-trust-policy.json
+github-actions-trust-policy.json
+github-actions-deploy-policy.json
+model-bucket-policy.json
