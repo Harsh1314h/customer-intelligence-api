@@ -453,16 +453,48 @@ deliberate manual action from the Actions tab. This was changed during Phase 9 �
 it, every push to `main` would have created a live ECS service and ALB (~\$26/month),
 silently undoing the Phase 8 teardown.
 
+### What CI has actually executed
+
+The logs of run `30171460578` (2026-07-25) were retrieved and read. The pipeline ran
+further than previously recorded:
+
+```text
+[ok]   test job                    ======== 12 passed, 7 warnings in 5.53s ========
+[ok]   actions/checkout@v4
+[ok]   Configure AWS credentials   "Assuming role with OIDC"
+[ok]   Create ECR repository if missing
+[ok]   Login to Amazon ECR
+[ok]   Build and push image        b78df7d442ad...: digest: sha256:54dde6b6987e6de7e182fd5a39a8816c9d3a2050a893421824d9673425dfcf7e  size: 2410
+[--]   Deploy ECS Express service  SKIPPED
+       "ECS Express deployment skipped because ECS secrets are not fully configured yet."
+[ok]   Print deployment summary
+```
+
+The deploy step was correctly skipped by its own guard —
+`ECS_TASK_EXECUTION_ROLE_ARN` and `ECS_INFRASTRUCTURE_ROLE_ARN` were both empty in that
+run's environment. The corresponding image tag is still present in ECR today, which
+independently corroborates that the build-and-push half of the pipeline worked.
+
+So OIDC authentication, ECR repository handling, image build, and image push are all
+**proven via CI**. Only the final `amazon-ecs-deploy-express-service` action remains
+unexercised.
+
 ---
 
 ## Not verified
 
 Stated plainly rather than implied:
 
-- **GitHub Actions has never completed a full run end-to-end.** GitHub Actions was in a
-  platform-wide outage during Phase 8, so the working deployment was done manually via
-  AWS CLI. The workflow YAML is valid and all four repository secrets and IAM roles are
-  in place, but the CI path itself remains unproven.
+- **The CI deploy step has never executed.** Everything up to and including the ECR push
+  is proven (see above), but `amazon-ecs-deploy-express-service` has never run — it was
+  skipped for missing secrets on 2026-07-25, and the re-run triggered after the secrets
+  were added on 2026-08-06 was caught by a platform-wide GitHub Actions outage and never
+  started. The live deployment was performed manually via AWS CLI instead.
+- **Pushes are currently not producing workflow runs.** The Phase 9 commit
+  (`4deae53`) pushed successfully to `origin/main`, but GitHub created **zero** workflow
+  runs for that SHA, and the 2026-08-06 re-run request is still stuck in a pre-queued
+  state that GitHub's own API refuses to cancel (`"Cannot cancel a workflow re-run that
+  has not yet queued"`). Actions appears to still be degraded for this repository.
 - **No live public URL right now.** The ECS service is intentionally torn down. Live
   behavior is evidenced by the Phase 8 deployment record, not by a currently reachable
   endpoint.
