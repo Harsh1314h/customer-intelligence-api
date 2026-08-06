@@ -1039,14 +1039,45 @@ Optional follow-ups, none of them blocking:
    Dispatching the workflow manually would prove that last step — but it deploys a live
    service, so tear it down afterwards.
 
-   **Known GitHub Actions problem as of 2026-08-07:** the Phase 9 push (`4deae53`) created
-   **zero** workflow runs, and the stuck 2026-08-06 re-run cannot be cancelled — both
-   `gh run cancel` and the `force-cancel` API return
-   `"Cannot cancel a workflow re-run that has not yet queued"`. Actions still appears
-   degraded for this repo. If that stuck re-run ever starts, it will use the OLD workflow
-   file from commit `b78df7d` (re-runs use the original commit's workflow), so the new
-   `workflow_dispatch` gating will not protect against it — and since the ECS secrets are
-   now set, it would deploy. Watch for it, and tear down if it appears.
+   **Known GitHub Actions problem as of 2026-08-07:** the Phase 9 pushes created **zero**
+   workflow runs, and the stuck 2026-08-06 re-run (`30171460578`) cannot be removed by any
+   means GitHub offers:
+
+```text
+gh run cancel        -> "Cannot cancel a workflow run that is completed"
+POST .../force-cancel -> 409 "Cannot cancel a workflow re-run that has not yet queued"
+DELETE .../runs/<id>  -> 403 "Could not delete the workflow run"
+```
+
+   The API reports it as `status=queued` with `0` jobs while simultaneously refusing
+   actions on the grounds that it is completed — an orphaned record left by the outage.
+   If it ever did start, it would use the OLD workflow file from commit `b78df7d`
+   (re-runs use their original commit's workflow), so the `workflow_dispatch` gating would
+   not stop it, and the ECS secrets are now set, so it would deploy. The AWS budget alert
+   below is the mitigation.
+
+## AWS Cost Guardrail (added 2026-08-07)
+
+An AWS Budgets alarm now exists on account `188947281989`:
+
+```text
+Budget name:  customer-intelligence-api-guardrail
+Limit:        USD 5.00 / month (COST, MONTHLY)
+Alert 1:      ACTUAL     > 20%  (USD 1.00)  -> azadharsh44@gmail.com
+Alert 2:      FORECASTED > 100% (USD 5.00)  -> azadharsh44@gmail.com
+```
+
+Baseline spend for this project is roughly \$0.30-0.50/month (ECR image storage plus 7.5 MB
+in S3), so the \$1 actual alert has headroom but still fires quickly if anything starts
+running. A live ECS service plus ALB costs about \$0.85/day, which forecasts well past \$5
+and triggers the second alert within about a day.
+
+This is a safety net, not a guard rail — AWS cost data lags 8-24 hours, so it catches a
+forgotten service the next day rather than the same minute. Check it with:
+
+```powershell
+aws budgets describe-budgets --account-id 188947281989
+```
 2. **Capture UI screenshots** for the README: Swagger UI at `/docs`, the `/health` response
    showing `demo_mode: false`, the MLflow run page, and the Docker container running.
    Terminal evidence for all of these already exists in `docs/verification-report.md`.
