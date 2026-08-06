@@ -18,3 +18,4 @@ ecs-model-bucket-policy.json
 ecs-infrastructure-trust-policy.json
 aws-tmp/
 verify_models/
+.claude/settings.local.json
