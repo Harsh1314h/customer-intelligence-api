@@ -1,74 +1,145 @@
 # Customer Intelligence API
 
-A production-style FastAPI service for e-commerce customer intelligence. It exposes three ML-powered REST endpoints for churn prediction, customer segmentation, and product recommendations.
+A production-style FastAPI service for e-commerce customer intelligence. Three ML-powered
+REST endpoints — churn prediction, customer segmentation, and product recommendations —
+trained on **1,062,989 real retail transactions**, containerized, tested in CI, and
+deployed to AWS.
 
-This project is designed like a backend service that another frontend, mobile app, CRM, or internal system could call with JSON and receive ML results in real time.
+Built as a backend service another frontend, mobile app, CRM, or internal system could
+call with JSON and get ML results in real time.
 
-## What It Does
+**Status:** complete and verified end-to-end. Deployed live to AWS ECS Express Mode on
+2026-08-07, verified against the public URL, then **deliberately torn down** to avoid an
+idle load balancer bill. See [Deployment](#aws-deployment) and
+[`docs/verification-report.md`](docs/verification-report.md).
 
-| Endpoint | Method | ML Paradigm | Purpose |
+---
+
+## Endpoints
+
+| Endpoint | Method | ML paradigm | Returns |
 | --- | --- | --- | --- |
-| `/health` | `GET` | Operations | Confirms service and model loading status |
-| `/predict/churn` | `POST` | Supervised learning | Predicts customer churn probability |
-| `/segment/customer` | `POST` | Unsupervised learning | Assigns a customer segment using K-Means |
-| `/recommend` | `POST` | Recommender systems | Returns top-N product recommendations |
+| `/health` | `GET` | Operations | Service status, loaded models, model version, `demo_mode` |
+| `/predict/churn` | `POST` | Supervised classification | Churn probability + risk band |
+| `/segment/customer` | `POST` | Unsupervised clustering | Business segment, cluster ID, distance to centroid |
+| `/recommend` | `POST` | Collaborative filtering | Top-N ranked products with names |
+| `/docs` | `GET` | — | Swagger UI (auto-generated) |
+
+Live examples of every request and response:
+[`docs/verification-report.md`](docs/verification-report.md).
+
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    client["Client / Frontend / CRM"] --> api["FastAPI Service"]
-    api --> schemas["Pydantic Validation"]
-    schemas --> registry["Model Registry"]
-    registry --> churn["Churn Ensemble"]
-    registry --> segment["K-Means Segmenter"]
-    registry --> recommend["Collaborative Recommender"]
-    artifacts["Local models/ or AWS S3"] --> registry
-    train["Training Pipeline"] --> artifacts
-    train --> mlflow["MLflow Tracking"]
-    github["GitHub Actions"] --> ecr["Amazon ECR"]
-    ecr --> ecs["Amazon ECS Express Mode"]
+    client["Client<br/>frontend · CRM · curl"] -->|HTTPS JSON| alb["ALB<br/>ECS Express managed"]
+    alb --> ecs["ECS Express Mode<br/>Fargate 256/512"]
+
+    subgraph container["Container"]
+        direction TB
+        fastapi["FastAPI + Uvicorn"] --> pydantic["Pydantic validation"]
+        pydantic --> registry["ModelRegistry<br/>in memory"]
+        registry --> churn["Churn ensemble"]
+        registry --> segment["K-Means segmenter"]
+        registry --> rec["SVD recommender"]
+    end
+
+    ecs --> fastapi
+    s3[("S3<br/>model artifacts")] -.->|startup download| registry
+    ecr[("ECR<br/>image")] -.->|pull| ecs
+
+    csv[("1.06M transactions")] --> train["scripts/train.py"]
+    train --> s3
+    train --> mlflow["MLflow"]
+    gh["GitHub Actions"] --> ecr
+
+    classDef store fill:#e8f0fe,stroke:#4285f4,color:#111
+    class s3,ecr,csv store
 ```
 
-## Tech Stack
+Detailed diagrams — request path, startup/model-loading path, training pipeline, and IAM
+trust relationships — are in [`docs/architecture.md`](docs/architecture.md).
 
-- **API:** FastAPI, Uvicorn, Pydantic
-- **ML/data:** Pandas, NumPy, scikit-learn, XGBoost, SciPy
-- **Model storage:** joblib artifacts
-- **Experiment tracking:** MLflow
-- **Testing:** pytest, FastAPI TestClient
-- **Containerization:** Docker
-- **Cloud target:** AWS S3, ECR, ECS Express Mode
-- **CI/CD:** GitHub Actions
+**The key design choice:** model artifacts are **not** baked into the Docker image. They
+are downloaded at startup from S3 via `CI_MODEL_ARTIFACT_URI`, so shipping a new model is
+an S3 upload plus a restart — no 2 GB image rebuild, and code and models roll back
+independently.
 
-## ML Models
+---
 
-### Churn Prediction
+## Tech stack
 
-The churn endpoint uses a supervised classification ensemble:
+| Layer | Choice |
+| --- | --- |
+| API | FastAPI, Uvicorn, Pydantic v2 |
+| ML / data | pandas, NumPy, scikit-learn, XGBoost, SciPy |
+| Model storage | joblib artifacts on S3 (or local dir / GCS) |
+| Experiment tracking | MLflow |
+| Testing | pytest, FastAPI `TestClient` |
+| Container | Docker (`python:3.11-slim`, non-root user) |
+| Cloud | AWS ECR, S3, ECS Express Mode, IAM OIDC |
+| CI/CD | GitHub Actions |
 
-- XGBoost classifier when available
-- scikit-learn MLP neural network
-- weighted average of both model probabilities
+Why each of these — and what was traded away — is in
+[`docs/interview-notes.md`](docs/interview-notes.md).
 
-Training uses time-based churn labels. The pipeline builds customer features from behavior before a cutoff date, then checks whether the customer returned in the next prediction window. This avoids the shortcut of simply labeling churn from current `recency_days`.
+---
 
-### Customer Segmentation
+## ML models
 
-The segmentation endpoint uses K-Means clustering on customer-level behavior features. Cluster IDs are mapped into readable business labels:
+### Churn prediction — the part worth reading
 
-- `high-value`
-- `at-risk`
-- `new`
-- `dormant`
+The obvious way to label churn is `recency_days > 90 → churned`. That produces a ROC AUC
+near 1.0 and a model that predicts nothing, because `recency_days` is also an input
+feature — the model just reads the label off the feature. Classic target leakage.
 
-### Product Recommendations
+This project uses **time-based snapshot labeling** instead
+(`build_time_based_churn_dataset` in `app/ml/features.py`):
 
-The recommendation endpoint uses collaborative filtering over customer-product purchase history. It builds an interaction matrix and uses Truncated SVD to learn product/customer similarity patterns.
+1. Pick 8 historical cutoff dates.
+2. Build features from transactions **strictly before** each cutoff.
+3. Label from whether the customer actually returned in the **following 90 days**.
+4. Require ≥90 days of prior history per snapshot.
 
-## Current Model Metrics
+Features and labels come from disjoint time windows, so nothing leaks. This yields 30,823
+training rows from 5,281 customers. The honest result is **ROC AUC 0.7916** — a lower
+number than the leaky version, and the correct one.
 
-The latest trained model artifacts were generated from `data/online_retail_cleaned.csv`.
+The model itself is a weighted ensemble: XGBoost (`0.65`) + scikit-learn MLP (`0.35`),
+falling back to `HistGradientBoostingClassifier` if XGBoost is unavailable.
+
+### Customer segmentation
+
+`StandardScaler` → K-Means (`k=4`) over the seven customer features, wrapped in a
+`Pipeline` so identical scaling is applied at train and inference time. Scaling is not
+optional here: `monetary` spans thousands while `frequency` spans single digits, so
+unscaled Euclidean distance would be driven almost entirely by `monetary`.
+
+Cluster IDs are deterministically mapped to business names from each cluster's feature
+means — `high-value`, `dormant`, `new`, `at-risk` — so cluster `0` means the same thing
+across retrains. The response also returns `distance_to_centroid` as an honesty signal:
+a large distance means the customer sits between clusters.
+
+### Product recommendations
+
+Collaborative filtering over a sparse 5,878 × 4,631 customer–product interaction matrix.
+Quantities are `log1p`-transformed so bulk orders do not dominate, then factorized with
+`TruncatedSVD` (50 components).
+
+Cold start degrades gracefully in three tiers: known customer → learned latent vector;
+unknown customer with recognizable `recent_product_ids` → mean of those item vectors;
+nothing recognizable → global popularity. `/recommend` always returns results and never
+errors on an unknown ID.
+
+---
+
+## Model metrics
+
+Trained from `data/online_retail_cleaned.csv`. **These numbers were re-verified by a full
+retrain on 2026-08-07 and reproduce to four decimal places** — see
+[`docs/verification-report.md`](docs/verification-report.md).
 
 | Metric | Value |
 | --- | ---: |
@@ -80,64 +151,32 @@ The latest trained model artifacts were generated from `data/online_retail_clean
 | Recommender customers | `5,878` |
 | Churn training rows | `30,823` |
 | Churn training customers | `5,281` |
+| Raw transactions | `1,062,989` |
+| Clean transactions | `805,549` |
 
-## Project Structure
+Limitations and intended use: [`docs/model-card.md`](docs/model-card.md).
 
-```text
-app/
-  main.py                 FastAPI app and endpoint routing
-  schemas.py              Pydantic request/response contracts
-  config.py               Environment-based settings
-  ml/
-    artifacts.py          Local, S3, and GCS artifact loading
-    churn.py              Churn ensemble wrapper
-    demo.py               Demo artifact generation
-    features.py           Data cleaning and feature engineering
-    recommender.py        Collaborative filtering recommender
-    registry.py           Model loading and registry
-    segmentation.py       K-Means prediction wrapper
-scripts/
-  train.py                Main ML training pipeline
-  create_demo_artifacts.py
-tests/
-  test_api.py
-  test_features.py
-  test_registry.py
-  test_recommender.py
-examples/
-  churn_request.json
-  segment_request.json
-  recommend_request.json
-  health_response.json
-docs/
-  aws-deployment.md
-Dockerfile
-requirements.txt
-requirements-dev.txt
-```
+---
 
-## Local Setup
+## Quick start
 
-Use Python `3.11`. Some ML packages may not have stable wheels for newer Python versions.
+Requires Python **3.11** — several ML wheels (XGBoost, SciPy) lag on newer releases.
 
 ```powershell
-cd "C:\Users\azadh\OneDrive\Documents\ecommerceAPI"
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-## Run The API Locally
-
-Use demo models:
+**Run with demo models** (no dataset needed — good for a 30-second look):
 
 ```powershell
 python -m scripts.create_demo_artifacts
 python -m uvicorn app.main:app --reload
 ```
 
-Use real trained models:
+**Run with real trained models:**
 
 ```powershell
 $env:CI_MODEL_DIR="models"
@@ -145,189 +184,369 @@ $env:CI_ALLOW_DEMO_MODELS="false"
 python -m uvicorn app.main:app --reload
 ```
 
-Open Swagger UI:
+Open <http://127.0.0.1:8000/docs>. `GET /health` should show `"demo_mode": false`.
 
-```text
-http://127.0.0.1:8000/docs
-```
+---
 
-Check:
-
-```text
-GET /health
-```
-
-For real models, `/health` should show:
-
-```json
-"demo_mode": false
-```
-
-## Train Real Models
-
-The current training dataset is:
-
-```text
-data/online_retail_cleaned.csv
-```
-
-Run:
+## Train the models
 
 ```powershell
 python -m scripts.train --transactions data\online_retail_cleaned.csv --output-dir models
 ```
 
-The trainer prints progress:
+Progress is printed at each stage:
 
 ```text
-[1/8] Loading transactions...
+[1/8] Loading transactions from data\online_retail_cleaned.csv...
+  - raw rows: 1,062,989
 [2/8] Cleaning transactions...
+  - cleaned rows: 805,549
 [3/8] Building latest customer features...
+  - customers: 5,878
 [4/8] Building time-based churn training snapshots...
-[5/8] Starting MLflow experiment...
+  - churn rows: 30,823
+  - churn customers: 5,281
+[5/8] Starting MLflow experiment 'customer-intelligence'...
 [6/8] Training churn ensemble...
+  Churn metrics:
+  - roc_auc: 0.7916
+  - average_precision: 0.8232
+  - accuracy: 0.7372
 [7/8] Training K-Means customer segmentation...
+  Segmentation metrics:
+  - silhouette: 0.4061
 [8/8] Training collaborative filtering recommender and saving artifacts...
+  Recommender stats:
+  - items: 4631
+  - users: 5878
+Done. Artifacts written to ...\models
 ```
 
-Generated artifacts:
+Produces `models/{churn_model,segment_model,recommender}.joblib` and `metadata.json`.
+
+### Inspect a trained bundle
+
+```powershell
+python -m scripts.inspect_metadata --model-dir models
+```
 
 ```text
-models/churn_model.joblib
-models/segment_model.joblib
-models/recommender.joblib
-models/metadata.json
+Model bundle: ...\models
+
+  version      20260613-194657
+  created_at   2026-06-13T19:46:57.648668+00:00
+  demo_mode    False
+  features     7: recency_days, frequency, monetary, tenure_days, ...
+
+  Churn training:
+    strategy                 time_based_snapshots
+    prediction_window_days   90
+    snapshots                8
+    rows                     30,823
+
+  Metrics:
+  churn:
+    roc_auc              0.7916
+  ...
+
+  Artifacts:
+    [ok]      churn        churn_model.joblib       434.5 KB
+    [ok]      segment      segment_model.joblib      25.1 KB
+    [ok]      recommender  recommender.joblib         6.7 MB
+
+Bundle is complete.
 ```
 
-## MLflow Tracking
+Exits non-zero if the bundle is incomplete, so it works as a pre-deploy gate. Add
+`--json` for the raw `metadata.json`.
 
-Start MLflow UI:
+### MLflow
 
 ```powershell
 python -m mlflow ui --backend-store-uri mlruns --port 5000
 ```
 
-Open:
+Open <http://127.0.0.1:5000>. Each run logs parameters, metrics, and the model artifacts
+that produced them.
 
-```text
-http://127.0.0.1:5000
-```
+---
 
-MLflow tracks parameters, metrics, and model artifacts for each training run.
+## Example requests
 
-## Example Requests
+Ready-to-use payloads live in `examples/`.
 
-Ready-to-copy examples:
-
-- `examples/churn_request.json`
-- `examples/segment_request.json`
-- `examples/recommend_request.json`
-- `examples/health_response.json`
-
-Churn:
+**Churn:**
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/predict/churn `
   -H "Content-Type: application/json" `
-  -d "{\"customer\":{\"customer_id\":\"17850\",\"recency_days\":22,\"frequency\":18,\"monetary\":3420.5,\"tenure_days\":340,\"avg_order_value\":190.03,\"total_items\":620,\"unique_products\":47}}"
+  -d "@examples/churn_request.json"
 ```
 
-Recommendation:
+```json
+{ "customer_id": "17850", "churn_probability": 0.1117,
+  "risk_band": "low", "model_version": "20260613-194657" }
+```
+
+**Segmentation:**
+
+```json
+{ "customer_id": "17850", "segment": "new", "cluster_id": 0,
+  "distance_to_centroid": 1.3553, "model_version": "20260613-194657" }
+```
+
+**Recommendations:**
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/recommend `
   -H "Content-Type: application/json" `
-  -d "{\"customer_id\":\"17850\",\"recent_product_ids\":[\"85123A\",\"71053\"],\"top_n\":5,\"include_seen\":false}"
+  -d "@examples/recommend_request.json"
 ```
 
-## Tests
+```json
+{ "customer_id": "17850", "recommendations": [
+    { "product_id": "72752A", "score": 68.4423, "name": "F.FAIRY,CANDLE IN GLASS,LILY/VALLEY" },
+    { "product_id": "35603B", "score": 55.0456, "name": "S/16 BLACK SHINY/MAT BAUBLES" },
+    { "product_id": "21343",  "score": 44.9041, "name": "GOLD JEWELERY BOX" }
+  ], "model_version": "20260613-194657" }
+```
 
-Run:
+Invalid input is rejected at the edge with the offending field named:
+
+```json
+{ "detail": [ { "type": "greater_than_equal",
+                "loc": ["body", "customer", "recency_days"],
+                "msg": "Input should be greater than or equal to 0", "input": -5 } ] }
+```
+
+---
+
+## Tests
 
 ```powershell
 python -m pytest
 ```
 
-Current local result:
-
 ```text
 12 passed
 ```
 
-The tests cover:
+Coverage: API contracts for all four endpoints, invalid-request validation, column-alias
+cleaning, the time-based churn labeling logic, registry metadata loading, the
+missing-artifact failure path, and recommender cold-start fallback.
 
-- API contracts
-- invalid request validation
-- data cleaning aliases
-- time-based churn labels
-- model registry metadata
-- recommender fallback behavior
+### Smoke test a running instance
+
+`scripts/smoke_test.py` exercises every endpoint against any URL — local, Docker, or a
+deployed AWS service — and exits non-zero on failure, so it doubles as a deployment gate.
+
+```powershell
+python -m scripts.smoke_test --base-url http://127.0.0.1:8080 --wait 60 --require-real-models
+```
+
+```text
+Smoke-testing http://127.0.0.1:8080
+  [ok]   health               GET /health -> 200  model_version=20260613-194657
+  [ok]   churn                POST /predict/churn -> 200  churn_probability=0.1117
+  [ok]   segment              POST /segment/customer -> 200  segment=new
+  [ok]   recommend            POST /recommend -> 200  5 recommendations
+  [ok]   docs                 GET /docs -> 200
+  [ok]   rejects bad input    POST /predict/churn -> 422
+  [ok]   all models loaded    version=20260613-194657
+  [ok]   demo_mode: false     serving real trained models
+
+All smoke checks passed.
+```
+
+`--require-real-models` makes `demo_mode: true` a failure rather than a warning.
+
+---
 
 ## Docker
-
-Build:
 
 ```powershell
 docker build -t customer-intelligence-api:local .
 ```
 
-Run with real local model artifacts:
+Run with real model artifacts mounted:
 
 ```powershell
-docker run --rm -p 8080:8080 -e CI_MODEL_DIR=/app/models -e CI_ALLOW_DEMO_MODELS=false -v "C:\Users\azadh\OneDrive\Documents\ecommerceAPI\models:/app/models:ro" customer-intelligence-api:local
+docker run --rm -p 8080:8080 `
+  -e CI_MODEL_DIR=/app/models -e CI_ALLOW_DEMO_MODELS=false `
+  -v "C:\Users\azadh\OneDrive\Documents\ecommerceAPI\models:/app/models:ro" `
+  customer-intelligence-api:local
 ```
 
-Open:
+Or pull models straight from S3, exactly as production does:
+
+```powershell
+docker run --rm -p 8080:8080 `
+  -e CI_ALLOW_DEMO_MODELS=false `
+  -e CI_MODEL_ARTIFACT_URI="s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/" `
+  -e AWS_REGION=ap-south-1 `
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY `
+  customer-intelligence-api:local
+```
+
+Then smoke-test it:
+
+```powershell
+python -m scripts.smoke_test --base-url http://127.0.0.1:8080 --wait 60 --require-real-models
+```
+
+The image runs as a non-root user (`apiuser`) on Python 3.11, and produces predictions
+byte-identical to the local venv.
+
+> **Windows:** run the `docker run` command from **PowerShell**, not Git Bash. Git Bash
+> rewrites the Windows path in `-v`, the mount silently resolves to an empty directory,
+> and the container exits with `RuntimeError: Missing model artifacts`.
+
+---
+
+## AWS deployment
+
+Deployed to **ECS Express Mode** in `ap-south-1` (account `188947281989`). App Runner was
+the original target but stopped accepting new customers after 2026-04-30; ECS Express
+Mode is the closest replacement — it provisions the ALB, target groups, security groups,
+and autoscaling from a single API call.
+
+### Verified live on 2026-08-07
 
 ```text
-http://127.0.0.1:8080/docs
+https://cu-2e0fbe4eb0454f1facc22a5cf4b20836.ecs.ap-south-1.on.aws
+
+GET  /health         -> 200  demo_mode: false, all 3 models loaded from S3
+GET  /docs           -> 200  Swagger UI
+POST /predict/churn  -> 200  {"churn_probability":0.1117,"risk_band":"low"}
 ```
 
-## AWS Deployment Status
+That same input returns `0.1117` in the local venv, in the local container, and when
+loading artifacts from S3 — identical predictions across four environments.
 
-AWS deployment uses ECS Express Mode because AWS App Runner is no longer accepting new customers after April 30, 2026.
+### Current state — intentionally torn down
 
-Completed:
-
-- S3 bucket created
-- Model artifacts uploaded to:
-
-```text
-s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
-```
-
-Prepared:
-
-- GitHub Actions AWS workflow in `.github/workflows/deploy.yml`
-- AWS deployment guide in `docs/aws-deployment.md`
-
-Remaining:
-
-- Create ECS IAM roles
-- Add GitHub secrets
-- Push Docker image to ECR
-- Deploy AWS ECS Express service
-- Verify public `/health` and `/docs`
-
-## Environment Variables
-
-| Variable | Purpose |
+| Resource | State |
 | --- | --- |
-| `CI_MODEL_DIR` | Local directory where models are loaded from |
-| `CI_MODEL_ARTIFACT_URI` | Optional cloud artifact path, such as `s3://bucket/prefix/` |
-| `CI_ALLOW_DEMO_MODELS` | Allows fallback demo artifacts when real artifacts are missing |
-| `CI_CORS_ORIGINS` | Allowed CORS origins |
+| ECR repository, S3 artifacts, IAM roles, OIDC provider, ECS cluster | **kept** (≈\$0/month) |
+| ECS Express service, Application Load Balancer | **deleted** (would be ≈\$26/month) |
 
-Production should use:
+Confirmed on 2026-08-07: `aws ecs list-services` and `aws elbv2 describe-load-balancers`
+both return empty. **The URL above is not live right now** — leaving an idle ALB running
+for a portfolio demo costs about \$17/month, so the evidence was captured instead.
 
-```text
-CI_ALLOW_DEMO_MODELS=false
-CI_MODEL_ARTIFACT_URI=s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+Redeploy commands (about 6 minutes to serve traffic; Express Mode's canary step
+legitimately shows 0 running tasks first) and the teardown step are in
+[`docs/architecture.md`](docs/architecture.md#redeploying-for-a-live-demo) and the
+"AWS Deployment History" section of `context.md`.
+
+### Cost control — deployment is manual on purpose
+
+`.github/workflows/deploy.yml` runs **tests on every push**, but the `deploy-aws` job
+fires **only on manual `workflow_dispatch`**:
+
+```yaml
+deploy-aws:
+  needs: test
+  if: github.event_name == 'workflow_dispatch'
 ```
 
-## Notes
+So a routine code change never creates AWS resources as a side effect. To deploy, open the
+repository's **Actions** tab and click **Run workflow**. This is deliberate: an idle ECS
+service plus its load balancer is roughly \$26/month, which is not a reasonable price for
+a push that fixed a typo.
 
-- `data/`, `models/`, `.venv/`, and `mlruns/` are intentionally ignored by Git.
-- Model files are stored locally for development and in S3 for deployment.
-- The API loads trained models once at startup through `ModelRegistry`.
-- Training is offline; prediction happens online through FastAPI endpoints.
+**After demoing, tear it down:**
+
+```powershell
+aws ecs delete-express-gateway-service `
+  --service-arn "arn:aws:ecs:ap-south-1:188947281989:service/default/customer-intelligence-api" `
+  --region ap-south-1
+```
+
+Deletion is asynchronous — the ALB takes 9–13 minutes to disappear. Confirm with
+`aws elbv2 describe-load-balancers --region ap-south-1` returning an empty list before
+considering it done.
+
+### CI/CD
+
+GitHub Actions authenticates to AWS with **OIDC** (`sts:AssumeRoleWithWebIdentity`) — no
+long-lived AWS access keys are stored in GitHub. The `deploy-aws` job depends on `test`,
+so a failing suite blocks deployment.
+
+The deploy path has **not yet completed a full run end-to-end**: GitHub Actions was in a
+platform-wide outage during the deployment window, so the working deployment was
+performed manually via AWS CLI. The YAML is valid and all four repository secrets and the
+IAM roles are in place, but the CI deploy path itself remains unproven — it will be
+exercised the first time the workflow is dispatched manually. Stated here rather than
+glossed over.
+
+---
+
+## Configuration
+
+| Variable | Purpose | Production value |
+| --- | --- | --- |
+| `CI_MODEL_DIR` | Local directory models are loaded from | `/app/models` |
+| `CI_MODEL_ARTIFACT_URI` | Optional `s3://`, `gs://`, or local path to sync artifacts from at startup | the S3 models prefix |
+| `CI_ALLOW_DEMO_MODELS` | Generate toy artifacts when real ones are missing | `false` |
+| `CI_CORS_ORIGINS` | Allowed CORS origins | your frontend origin |
+
+With `CI_ALLOW_DEMO_MODELS=false`, a missing artifact **crashes the container at
+startup** instead of silently serving toy predictions. Failing loudly at deploy time
+beats a healthy-looking service returning meaningless numbers.
+
+---
+
+## Project structure
+
+```text
+app/
+  main.py                 FastAPI app, endpoints, lifespan model loading
+  schemas.py              Pydantic request/response contracts
+  config.py               Environment-based settings (CI_* prefix)
+  ml/
+    artifacts.py          Artifact sync from S3 / GCS / local dir
+    churn.py              Weighted churn ensemble
+    demo.py               Demo artifact generation
+    features.py           Cleaning, feature engineering, time-based churn labels
+    recommender.py        SVD collaborative filtering + cold-start fallback
+    registry.py           Loads artifacts once at startup, holds them in memory
+    segmentation.py       K-Means prediction wrapper
+scripts/
+  train.py                Training pipeline (8 logged stages)
+  inspect_metadata.py     CLI summary of a trained model bundle
+  smoke_test.py           Endpoint smoke test for any running instance
+  create_demo_artifacts.py
+tests/                    12 tests: API, features, registry, recommender
+examples/                 Ready-to-use request/response JSON
+docs/
+  architecture.md         System, request, startup, training, and IAM diagrams
+  interview-notes.md      Design decisions and trade-offs
+  model-card.md           Models, metrics, limitations, intended use
+  verification-report.md  Full end-to-end verification evidence
+  aws-deployment.md       AWS setup guide
+.github/workflows/
+  deploy.yml              Test -> build -> push to ECR -> deploy ECS Express
+Dockerfile                python:3.11-slim, non-root user
+pytest.ini                pythonpath = . (so CI can import `app`)
+```
+
+---
+
+## Known limitations
+
+Stated plainly rather than buried:
+
+- **No authentication or rate limiting.** The endpoints are open.
+- **No structured logging, tracing, or metrics.** No request IDs, no latency histograms.
+- **No model monitoring.** Nothing detects feature drift or score-distribution collapse.
+- **The churn evaluation split is random, not strictly time-based.** Snapshots overlap and
+  the same customer appears in several rows, so the reported AUC is probably slightly
+  optimistic.
+- **Ensemble weights (0.65/0.35) are untuned** — a judgement call, not a swept result.
+- **No recommendation evaluation metric.** Offline precision@k on implicit purchase data
+  is hard to do honestly; the real answer is an A/B test.
+- **The image is 2.1 GB.** A multi-stage build dropping MLflow from the runtime image
+  would cut it substantially.
+- **`data/`, `models/`, `mlruns/`, and `.venv/` are gitignored** — the dataset and
+  artifacts are not in this repository.

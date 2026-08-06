@@ -37,6 +37,19 @@ Current status:
   - added `pytest.ini` with `pythonpath = .`
   - ignored local AWS policy JSON helper files in `.gitignore`
 - AWS CLI is configured locally as `arn:aws:iam::188947281989:user/customer-intelligence-admin`, so deployment can continue from local PowerShell instead of CloudShell.
+- Phase 7 (AWS deployment prep) is complete: ECR repo, GitHub OIDC provider/deploy role, and both ECS roles (task execution + infrastructure) exist with correct permissions.
+- Phase 8 (AWS deployment) is complete: the API was deployed live to ECS Express Mode on 2026-08-07, verified working end-to-end (`/health`, `/docs`, `/predict/churn` all returned real model output), then torn down to stop billing. See "AWS Deployment History" section below for full detail and re-deploy steps.
+- Phase 9 (resume/portfolio polish) is complete as of 2026-08-07. All 9 phases are now done. See "Phase 9 Completion" section below.
+
+## Project Status: COMPLETE
+
+All 9 phases are finished. The project was fully re-verified end-to-end on 2026-08-07 —
+12/12 checks passed, recorded verbatim in `docs/verification-report.md`.
+
+Working copy note: this work was done in `C:\customer-intelligence-api-main\customer-intelligence-api-main`
+(an extracted copy of the repo). The actual git repository with `.git`, `.venv`, `data/`,
+`models/`, and `mlruns/` lives at `C:\Users\azadh\OneDrive\Documents\ecommerceAPI`.
+Changes were synced from the working copy into the git repo and pushed from there.
 
 GitHub remote:
 
@@ -419,6 +432,89 @@ Completed AWS preparation:
 s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
 ```
 
+## AWS Deployment History (Phases 7-8, completed 2026-08-07)
+
+This section records exactly what was created in AWS account `188947281989` (region `ap-south-1`) and how to redeploy.
+
+### AWS resources created
+
+Persistent (kept, near-zero cost):
+
+```text
+ECR repository:            customer-intelligence-api
+S3 model artifacts:        s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/
+IAM: CustomerIntelligenceECSTaskExecutionRole   (pulls image, reads S3 models, writes logs)
+IAM: CustomerIntelligenceECSInfrastructureRole  (manages ALB/SG/autoscaling for ECS Express)
+IAM: GitHubActionsCustomerIntelligenceDeployRole (GitHub OIDC deploy role)
+IAM OIDC provider: token.actions.githubusercontent.com
+Service-linked roles: AWSServiceRoleForECS, AWSServiceRoleForElasticLoadBalancing
+ECS cluster: default (empty cluster, no charge)
+ECR image tags pushed: manual-20260807, latest
+```
+
+Torn down after verification (these are the billable pieces):
+
+```text
+ECS Express service: customer-intelligence-api (deleted)
+Application Load Balancer: ecs-express-gateway-alb-* (deleted)
+Target groups, ECS-managed security groups (deleted automatically with the service)
+```
+
+### What actually happened
+
+1. AWS CLI v2 and GitHub CLI were installed locally (via winget) and authenticated (`customer-intelligence-admin` IAM user for AWS; device-code browser login for GitHub as `Harsh1314h`).
+2. Found the GitHub Actions deploy role's inline policy (`CustomerIntelligenceDeployPolicy`) was stale from an earlier App Runner attempt — replaced it with ECS/Express-Gateway-scoped permissions (`ecr:*` push actions, `ecs:CreateExpressGatewayService`/`UpdateExpressGatewayService`/etc., `iam:PassRole` scoped to the two ECS roles).
+3. Created `CustomerIntelligenceECSTaskExecutionRole` (trusts `ecs-tasks.amazonaws.com`, has `AmazonECSTaskExecutionRolePolicy` + an inline S3 read policy scoped to the models bucket/prefix) and `CustomerIntelligenceECSInfrastructureRole` (trusts `ecs.amazonaws.com`, has managed policy `AmazonECSInfrastructureRoleforExpressGatewayServices` — this is the real current AWS managed-policy name for ECS Express Mode; the name `AmazonECSInfrastructureRolePolicyForManagedInstances` referenced earlier in this doc's step-by-step guide is a *different*, unrelated policy for a different ECS launch mode and should not be used for Express services).
+4. Confirmed all 4 GitHub secrets (`AWS_ROLE_TO_ASSUME`, `ECS_TASK_EXECUTION_ROLE_ARN`, `ECS_INFRASTRUCTURE_ROLE_ARN`, `CI_MODEL_ARTIFACT_URI`) were set on the repo via `gh secret set`.
+5. Re-ran the existing GitHub Actions workflow run to pick up the new secrets, but **GitHub Actions was in a platform-wide outage starting 2026-08-06** ("Incident with Actions" on githubstatus.com — hosted runners delayed/stuck queued). The workflow run stayed queued indefinitely.
+6. To avoid an open-ended wait on GitHub's outage, deployed manually from the local machine instead of via CI:
+   - `docker build` the image from the repo's `Dockerfile`.
+   - `docker login`/`push` to ECR — note: on Windows PowerShell, `aws ecr get-login-password | docker login --password-stdin` **fails with a 400 Bad Request** because PowerShell's pipe mangles the token's encoding for native binaries. Workaround used: `docker login --username AWS --password $pw $registry` (password as an argument; a minor local-only exposure, acceptable for a one-off manual deploy, not for anything checked in).
+   - `aws ecs create-express-gateway-service` directly (the AWS CLI has native `create-express-gateway-service` / `update-` / `describe-` / `delete-` / `monitor-express-gateway-service` subcommands — no need for the `aws-actions/amazon-ecs-deploy-express-service` GitHub Action).
+7. First `create-express-gateway-service` call failed with `Unable to assume the service linked role` — the `AWSServiceRoleForElasticLoadBalancing` service-linked role didn't exist yet in this account. Fixed with `aws iam create-service-linked-role --aws-service-name elasticloadbalancing.amazonaws.com`, then the create call succeeded.
+8. Deployment used a **canary strategy by default** (5% canary, 3-minute bake time). With `desiredCount=1`, 5% of 1 rounds down to 0, so the service showed 0 running tasks for the first several minutes before the canary step auto-promoted to 100%. This is expected behavior for Express services with very low task counts, not a failure — just be patient (took about 6 minutes total from `create` to a running task) rather than assuming it's stuck.
+9. Verified live and working:
+   - `GET /health` → `200`, `demo_mode: false`, all 3 models loaded from S3.
+   - `GET /docs` → `200`, Swagger UI served.
+   - `POST /predict/churn` with `examples/churn_request.json` → `200`, real prediction (`churn_probability: 0.1117`, `risk_band: low`).
+   - Full evidence saved locally at `aws-tmp/deployment-evidence.txt` (not committed to git — local only).
+10. Torn down with `aws ecs delete-express-gateway-service`. Deletion is asynchronous: the service went `DRAINING` immediately but the ALB/target groups/security groups took roughly 9-13 minutes to actually disappear. Confirmed fully gone via `aws elbv2 describe-load-balancers` (empty) and `aws ec2 describe-security-groups --filters Name=tag:AmazonECSManaged,Values=true` (empty) before considering teardown complete.
+
+### Redeploying later (e.g. for a live recruiter demo)
+
+Once GitHub Actions recovers from its outage, pushing to `main` (or re-running the workflow) should work end-to-end on its own, since secrets and IAM roles are already in place.
+
+To redeploy manually instead (same steps used above):
+
+```powershell
+$env:Path += ";$env:LOCALAPPDATA\Programs\Amazon\AWSCLIV2"
+$registry = "188947281989.dkr.ecr.ap-south-1.amazonaws.com"
+$repo = "customer-intelligence-api"
+$pw = aws ecr get-login-password --region ap-south-1
+docker login --username AWS --password $pw $registry   # use --password, not stdin, on Windows PowerShell
+docker build -t "$registry/${repo}:latest" .
+docker push "$registry/${repo}:latest"
+
+aws ecs create-express-gateway-service `
+  --service-name customer-intelligence-api `
+  --cluster default `
+  --execution-role-arn "arn:aws:iam::188947281989:role/CustomerIntelligenceECSTaskExecutionRole" `
+  --infrastructure-role-arn "arn:aws:iam::188947281989:role/CustomerIntelligenceECSInfrastructureRole" `
+  --task-role-arn "arn:aws:iam::188947281989:role/CustomerIntelligenceECSTaskExecutionRole" `
+  --health-check-path "/health" `
+  --cpu "256" --memory "512" `
+  --primary-container '{"image":"'$registry'/'$repo':latest","containerPort":8080,"environment":[{"name":"CI_MODEL_ARTIFACT_URI","value":"s3://customer-intelligence-models-harsh1314h/customer-intelligence/models/"},{"name":"CI_ALLOW_DEMO_MODELS","value":"false"}]}' `
+  --region ap-south-1
+```
+
+**Remember to tear it down again after demoing** to avoid ongoing ALB/Fargate charges:
+
+```powershell
+aws ecs delete-express-gateway-service --service-arn "arn:aws:ecs:ap-south-1:188947281989:service/default/customer-intelligence-api" --region ap-south-1
+```
+
+Then wait ~10-15 minutes and confirm with `aws elbv2 describe-load-balancers --region ap-south-1` that the load balancer is gone before considering it done.
+
 ## Common Commands Used
 
 ### Activate Virtual Environment
@@ -717,120 +813,128 @@ Completion criteria:
 - API works outside the local Python virtual environment.
 - Dockerized API uses real trained model artifacts.
 
-### Phase 7 - AWS Deployment Preparation
+### Phase 7 - AWS Deployment Preparation (COMPLETE, 2026-08-07)
 
 Goal:
 
 Prepare AWS resources without rushing deployment.
 
-Tasks:
+Status: done. S3 bucket + model files, ECR repository, both ECS IAM roles, GitHub OIDC provider, and the GitHub Actions deploy role all exist and are correctly scoped. See "AWS Deployment History" above for exact resource names and what was fixed (the deploy role's policy was stale from an earlier App Runner attempt and had to be replaced with ECS-scoped permissions).
 
-- Understand where AWS commands run:
-  - AWS CloudShell for `aws ...` commands
-  - local PowerShell for project commands
-  - GitHub website for secrets
-- Create S3 bucket for model artifacts.
-- Upload model files:
-
-```text
-churn_model.joblib
-segment_model.joblib
-recommender.joblib
-metadata.json
-```
-
-- Create ECR repository.
-- Create ECS task execution role to pull from ECR and read S3 model artifacts.
-- Create ECS infrastructure role for ECS Express Mode.
-- Create GitHub Actions deploy role.
-- Add first GitHub secret:
-
-```text
-AWS_ROLE_TO_ASSUME
-```
-
-Completion criteria:
-
-- AWS has S3 bucket and IAM roles ready.
-- GitHub can authenticate to AWS using OIDC.
-
-### Phase 8 - AWS Deployment
+### Phase 8 - AWS Deployment (COMPLETE, 2026-08-07)
 
 Goal:
 
 Deploy the API publicly on AWS ECS Express Mode.
 
-Tasks:
+Status: done, then intentionally torn down. The API was deployed live to ECS Express Mode, verified working (`/health` showed `demo_mode: false` with all 3 models loaded, `/docs` served Swagger UI, `/predict/churn` returned a real prediction), then the ECS service/ALB were deleted to stop billing — this was a deliberate cost-control decision, not a failure. GitHub Actions itself was down for a platform-wide outage during this work, so the deploy was done manually via AWS CLI/Docker from local PowerShell rather than through the CI workflow; the workflow should still work on its own next time GitHub Actions is healthy, since all required secrets and IAM roles are now in place. See "AWS Deployment History" above for exact commands to redeploy and re-verify.
 
-- Push workflow to GitHub.
-- Let GitHub Actions build image and push to ECR.
-- Deploy ECS Express service from the ECR image.
-- Configure environment variables:
-
-```text
-CI_MODEL_ARTIFACT_URI=s3://YOUR_BUCKET/customer-intelligence/models/
-CI_ALLOW_DEMO_MODELS=false
-```
-
-- Add remaining GitHub secrets:
-
-```text
-ECS_TASK_EXECUTION_ROLE_ARN
-ECS_INFRASTRUCTURE_ROLE_ARN
-CI_MODEL_ARTIFACT_URI
-```
-
-- Push again or rerun workflow.
-- Test deployed API:
-
-```text
-https://YOUR_ECS_EXPRESS_URL/health
-https://YOUR_ECS_EXPRESS_URL/docs
-```
-
-Completion criteria:
-
-- Public API is live.
-- `/health` shows real models loaded.
-- Swagger UI works from the ECS Express service URL.
-
-### Phase 9 - Resume And Portfolio Polish
+### Phase 9 - Resume And Portfolio Polish (COMPLETE, 2026-08-07)
 
 Goal:
 
 Turn the project into a strong resume/interview artifact.
 
-Tasks:
+Status: done. Delivered:
 
-- Improve README with:
-  - project overview
-  - architecture diagram
-  - endpoints table
-  - ML methods used
-  - metrics
-  - deployment link
-  - screenshots
-- Add a short `docs/model-card.md`.
-- Add a short `docs/interview-notes.md` explaining:
-  - why FastAPI
-  - why Docker
-  - why MLflow
-  - why time-based churn labels
-  - why S3/ECR/ECS Express Mode
-- Add final architecture diagram showing:
-  - client
-  - ECS Express Mode
-  - FastAPI
-  - model registry
-  - S3 model artifacts
-  - ECR image
-  - GitHub Actions
+- `README.md` rewritten: status banner, endpoints table, mermaid architecture diagram,
+  tech stack table, ML explanations (including why time-based churn labels beat the leaky
+  `recency_days > 90` approach), verified metrics table, quick start, training output,
+  example requests with real responses, tests, smoke test, Docker (both volume-mount and
+  S3 modes), AWS deployment status with the cost-control warning, configuration table,
+  project structure, and an explicit known-limitations section.
+- `docs/architecture.md` (new): five mermaid diagrams — system overview, request sequence
+  for `POST /predict/churn`, startup/model-loading decision flow, training pipeline, and
+  IAM trust relationships. Plus an AWS resource table with per-resource idle cost and the
+  redeploy/teardown commands.
+- `docs/interview-notes.md` (new): why FastAPI, why Docker, why models load from S3 rather
+  than being baked into the image, why MLflow, why time-based churn labels (with the target
+  leakage explanation), why the XGBoost+MLP ensemble, why K-Means and how clusters get
+  business names, why TruncatedSVD collaborative filtering, why ECS Express over
+  App Runner/Lambda/EKS, what is missing, and a 60-second verbal summary.
+- `docs/verification-report.md` (new): verbatim evidence for all 12 verification checks.
+- `docs/model-card.md` updated: added a reproducibility section, expanded limitations
+  (random vs time-based split, no recommendation metric, untuned ensemble weights, no
+  monitoring), refreshed next improvements, cross-links to the other docs.
+- `scripts/inspect_metadata.py` (new): CLI that summarizes a trained model bundle —
+  version, features, churn training config, metrics, artifact sizes. Exits non-zero on an
+  incomplete bundle so it works as a pre-deploy gate. `--json` prints raw metadata.
+- `scripts/smoke_test.py` (new): exercises all endpoints plus a 422 validation case against
+  any base URL (local, Docker, or a deployed AWS URL). `--wait` polls a booting container,
+  `--require-real-models` turns `demo_mode: true` into a failure. Exit code 0/1.
+- `.gitignore`: added `aws-tmp/` and `verify_models/`.
+- `.github/workflows/deploy.yml`: gated `deploy-aws` behind `workflow_dispatch` so pushes
+  no longer create billable AWS resources. See "CI deployment is now manual" below.
 
-Completion criteria:
+Note on screenshots: the original task list asked for UI screenshots. This session ran
+headless, so verbatim terminal transcripts in `docs/verification-report.md` were captured
+instead — including `GET /docs -> 200` proving Swagger UI is served locally and in Docker.
+Screenshots can still be added later by running the app and capturing `/docs`, `/health`,
+the MLflow run page, and the Docker container.
 
-- Project can be explained in interviews.
-- README is polished enough to send to recruiters.
-- Deployment URL and screenshots prove it works.
+## Phase 9 Completion - Verification Run (2026-08-07)
+
+Everything was re-verified before the final commit. Full transcripts are in
+`docs/verification-report.md`. Summary — 12/12 passed:
+
+```text
+ 1. pytest                      12 passed
+ 2. All 4 endpoints, real models 200, demo_mode: false
+ 3. Input validation            422 with the offending field named
+ 4. Churn discrimination        0.1117 (active) vs 0.9360 (dormant)
+ 5. Recommender cold start      unknown ID -> popular items, 200 not 500
+ 6. Full training pipeline      1,062,989 raw rows -> metrics reproduced to 4 dp
+ 7. MLflow                      params + metrics + artifacts logged, run FINISHED
+ 8. Docker build                2.12 GB
+ 9. Docker run                  all endpoints 200, non-root user apiuser, Python 3.11.15
+10. S3 artifact loading         boto3 downloaded all 4 artifacts, predictions identical
+11. AWS resource state          S3 + ECR present; 0 ECS services, 0 load balancers
+12. CI workflow YAML            parses, 2 jobs, deploy-aws depends on test
+```
+
+Key result: the same churn input returns `0.1117` in the local venv, in the Docker
+container, when loading artifacts from S3, and on the live AWS deployment recorded in
+`aws-tmp/deployment-evidence.txt`. Identical predictions across four environments.
+
+Also confirmed: **the AWS account is not accruing charges** for this project.
+`aws ecs list-services --cluster default` returns `[]` and
+`aws elbv2 describe-load-balancers` returns `[]`.
+
+### CI deployment is now manual (changed in Phase 9)
+
+Previously `.github/workflows/deploy.yml` ran the `deploy-aws` job on every push to
+`main`. Since all four repository secrets are set, that meant any push — even a README
+typo fix — would create a live ECS Express service and ALB (~**\$26/month**), silently
+undoing the Phase 8 teardown.
+
+Changed on 2026-08-07 to:
+
+```yaml
+on:
+  push: ...
+  pull_request: ...
+  workflow_dispatch:        # added
+
+jobs:
+  deploy-aws:
+    needs: test
+    if: github.event_name == 'workflow_dispatch'    # was: push && ref == refs/heads/main
+```
+
+Now:
+
+- Pushing to `main` runs the **test** job only. No AWS resources are created.
+- To deploy, open the repo's **Actions** tab and click **Run workflow**.
+- The workflow's summary step prints the teardown command as a reminder.
+
+After any manual deploy, tear it down:
+
+```powershell
+aws ecs delete-express-gateway-service --service-arn "arn:aws:ecs:ap-south-1:188947281989:service/default/customer-intelligence-api" --region ap-south-1
+```
+
+Then wait 9-13 minutes and confirm `aws elbv2 describe-load-balancers --region ap-south-1`
+returns an empty list.
 
 ### Learning And Documentation
 
@@ -879,20 +983,18 @@ mlruns/
 
 ### AWS Deployment
 
-Paused for now.
+Complete as of 2026-08-07. All 10 of the original steps below are done — kept here for historical reference only. See "AWS Deployment History" above for what actually happened and how to redeploy.
 
-Remaining AWS tasks:
-
-1. Create or use AWS account.
-2. Open AWS CloudShell.
-3. Create S3 bucket.
-4. Upload model files to S3.
-5. Create IAM roles for ECS Express Mode and GitHub Actions.
-6. Add GitHub repository secrets.
-7. Push workflow to GitHub.
-8. Let GitHub Actions build and push Docker image to ECR.
-9. Deploy ECS Express service.
-10. Test deployed `/health` and `/docs`.
+1. ~~Create or use AWS account.~~ (existing account, `188947281989`)
+2. ~~Open AWS CloudShell.~~ (used local PowerShell + AWS CLI instead)
+3. ~~Create S3 bucket.~~
+4. ~~Upload model files to S3.~~
+5. ~~Create IAM roles for ECS Express Mode and GitHub Actions.~~
+6. ~~Add GitHub repository secrets.~~
+7. ~~Push workflow to GitHub.~~ (workflow existed already; re-ran it, but GitHub Actions was down)
+8. ~~Let GitHub Actions build and push Docker image to ECR.~~ (done manually via local Docker instead, due to the GitHub Actions outage)
+9. ~~Deploy ECS Express service.~~ (deployed, verified, then deliberately torn down to stop billing)
+10. ~~Test deployed `/health` and `/docs`.~~ (both confirmed working, plus a real `/predict/churn` call)
 
 ## Known Notes And Issues
 
@@ -922,10 +1024,21 @@ git status --short
 
 ## Next Best Step
 
-Before continuing AWS deployment:
+All 9 phases are complete as of 2026-08-07. The project is finished for now.
 
-1. Commit and push the README/model-card documentation polish.
-2. Confirm GitHub Actions status on GitHub.
-3. Create ECS Express IAM roles.
-4. Add ECS GitHub secrets.
-5. Deploy to ECS Express Mode.
+Optional follow-ups, none of them blocking:
+
+1. **Confirm GitHub Actions works end-to-end.** The workflow has still never completed a
+   full CI run — GitHub Actions was in a platform-wide outage during Phase 8, so the
+   working deployment was done manually via AWS CLI. The YAML is valid and all secrets and
+   IAM roles are in place, but the CI path is unproven. Note that a successful run will
+   deploy a live ECS service (see the cost warning above).
+2. **Capture UI screenshots** for the README: Swagger UI at `/docs`, the `/health` response
+   showing `demo_mode: false`, the MLflow run page, and the Docker container running.
+   Terminal evidence for all of these already exists in `docs/verification-report.md`.
+3. **Before a live recruiter demo,** redeploy with the commands in "AWS Deployment History"
+   above, then tear it down afterwards. The service is not left running by default.
+4. **Engineering improvements**, in rough priority order: a strict time-based holdout for
+   churn evaluation; structured logging with request IDs and latency metrics; API
+   authentication and rate limiting; model monitoring for feature drift; a multi-stage
+   Docker build to cut the 2.1 GB image.

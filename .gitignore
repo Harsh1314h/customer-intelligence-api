@@ -16,3 +16,5 @@ model-bucket-policy.json
 ecs-task-trust-policy.json
 ecs-model-bucket-policy.json
 ecs-infrastructure-trust-policy.json
+aws-tmp/
+verify_models/
