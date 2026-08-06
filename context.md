@@ -1028,11 +1028,25 @@ All 9 phases are complete as of 2026-08-07. The project is finished for now.
 
 Optional follow-ups, none of them blocking:
 
-1. **Confirm GitHub Actions works end-to-end.** The workflow has still never completed a
-   full CI run — GitHub Actions was in a platform-wide outage during Phase 8, so the
-   working deployment was done manually via AWS CLI. The YAML is valid and all secrets and
-   IAM roles are in place, but the CI path is unproven. Note that a successful run will
-   deploy a live ECS service (see the cost warning above).
+1. **Exercise the CI deploy step.** Reading the logs of run `30171460578` on 2026-08-07
+   showed CI has gone further than previously recorded: the test job passed (`12 passed`),
+   OIDC role assumption worked, ECR login worked, and the image was built and pushed
+   (`digest: sha256:54dde6b6987e6de7...`, tag `b78df7d442ad...`, still in ECR today).
+   Only the final `amazon-ecs-deploy-express-service` step has never run — it was skipped
+   by its own guard because `ECS_TASK_EXECUTION_ROLE_ARN` and
+   `ECS_INFRASTRUCTURE_ROLE_ARN` were empty at the time. Those secrets were added
+   2026-08-06; the re-run to pick them up got stuck in the GitHub Actions outage.
+   Dispatching the workflow manually would prove that last step — but it deploys a live
+   service, so tear it down afterwards.
+
+   **Known GitHub Actions problem as of 2026-08-07:** the Phase 9 push (`4deae53`) created
+   **zero** workflow runs, and the stuck 2026-08-06 re-run cannot be cancelled — both
+   `gh run cancel` and the `force-cancel` API return
+   `"Cannot cancel a workflow re-run that has not yet queued"`. Actions still appears
+   degraded for this repo. If that stuck re-run ever starts, it will use the OLD workflow
+   file from commit `b78df7d` (re-runs use the original commit's workflow), so the new
+   `workflow_dispatch` gating will not protect against it — and since the ECS secrets are
+   now set, it would deploy. Watch for it, and tear down if it appears.
 2. **Capture UI screenshots** for the README: Swagger UI at `/docs`, the `/health` response
    showing `demo_mode: false`, the MLflow run page, and the Docker container running.
    Terminal evidence for all of these already exists in `docs/verification-report.md`.

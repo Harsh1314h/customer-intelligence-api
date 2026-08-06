@@ -473,12 +473,27 @@ GitHub Actions authenticates to AWS with **OIDC** (`sts:AssumeRoleWithWebIdentit
 long-lived AWS access keys are stored in GitHub. The `deploy-aws` job depends on `test`,
 so a failing suite blocks deployment.
 
-The deploy path has **not yet completed a full run end-to-end**: GitHub Actions was in a
-platform-wide outage during the deployment window, so the working deployment was
-performed manually via AWS CLI. The YAML is valid and all four repository secrets and the
-IAM roles are in place, but the CI deploy path itself remains unproven — it will be
-exercised the first time the workflow is dispatched manually. Stated here rather than
-glossed over.
+**What CI has actually proven** (run `30171460578`, 2026-07-25):
+
+```text
+[ok]   test job                  12 passed
+[ok]   checkout
+[ok]   Configure AWS credentials  "Assuming role with OIDC"  (no static keys)
+[ok]   Create ECR repository if missing
+[ok]   Login to Amazon ECR
+[ok]   Build and push image       digest: sha256:54dde6b6987e6de7...
+[--]   Deploy ECS Express service SKIPPED - ECS role secrets were empty at the time
+[ok]   Print deployment summary
+```
+
+So the pipeline is verified through OIDC authentication, image build, and ECR push — that
+`b78df7d…` image tag is still in the registry today. **The one step never exercised via CI
+is the final `amazon-ecs-deploy-express-service` action.** It was skipped because the two
+ECS role secrets had not been added yet; they were added on 2026-08-06, and the re-run
+triggered to pick them up was caught by a platform-wide GitHub Actions outage and never
+started. The live deployment was therefore performed manually via AWS CLI instead.
+
+That last step will be exercised the first time the workflow is dispatched manually.
 
 ---
 
